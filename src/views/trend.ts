@@ -5,6 +5,7 @@ import { baseFont, Chart, palette } from '../lib/chart';
 import { deg, escapeHtml, num, shortDate, weekday } from '../lib/format';
 import type { Place } from '../lib/places';
 import { sunshineByDay, type DaySun } from '../lib/sun';
+import { tempColor } from '../lib/tempscale';
 import { attribution, showError, skeleton } from '../lib/ui';
 
 /** From this day index on (day 10) only ranges are shown, no single values. */
@@ -303,10 +304,12 @@ function table(days: TrendDay[], sun: (Band | null)[], source: SunSource) {
   const rows = days
     .map((d, i) => {
       const exact = i < TENDENCY_FROM;
-      const t = (b: TrendDay['tmax'], cls: string) =>
-        exact
-          ? `<span class="${cls}">${deg(b.p50)}</span><br><span class="small muted">${deg(b.p10)}…${deg(b.p90)}</span>`
-          : `<span class="${cls}">${deg(b.p10)}…${deg(b.p90)}</span>`;
+      const t = (b: TrendDay['tmax'], cls: string) => {
+        const attrs = `class="temp ${cls}" style="--t:${tempColor(b.p50)}"`;
+        return exact
+          ? `<span ${attrs}>${deg(b.p50)}</span><br><span class="small muted">${deg(b.p10)}…${deg(b.p90)}</span>`
+          : `<span ${attrs}>${deg(b.p10)}…${deg(b.p90)}</span>`;
+      };
       return `<tr class="${exact ? '' : 'unsure'}">
         <td><strong>${weekday(d.date, today)}</strong> <span class="small muted">${shortDate(d.date)}</span></td>
         <td class="num">${t(d.tmax, 'warm')}</td>

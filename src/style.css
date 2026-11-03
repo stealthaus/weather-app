@@ -12,8 +12,8 @@
   --cold-band: rgba(133, 183, 235, 0.5);
   --rain: #378add;
   --rain-soft: rgba(55, 138, 221, 0.28);
-  --sun: #a86b00;
-  --sun-soft: rgba(212, 154, 18, 0.35);
+  --sun: #c99a00;
+  --sun-soft: rgba(240, 194, 30, 0.4);
   --uncertain: rgba(28, 28, 26, 0.045);
   --danger: #a32d2d;
   --skeleton: #e9e7e0;
@@ -38,8 +38,8 @@
     --cold-band: rgba(55, 138, 221, 0.36);
     --rain: #5ea3e6;
     --rain-soft: rgba(94, 163, 230, 0.3);
-    --sun: #e3b341;
-    --sun-soft: rgba(227, 179, 65, 0.3);
+    --sun: #f2c94c;
+    --sun-soft: rgba(242, 201, 76, 0.32);
     --uncertain: rgba(237, 235, 228, 0.05);
     --danger: #f09595;
     --skeleton: #2a2a28;
@@ -236,7 +236,7 @@ section.block + section.block { border-top: 1px solid var(--rule); }
 .range .lo { color: var(--text-2); text-align: right; }
 .range .hi { text-align: left; font-weight: 600; }
 .range-bar { position: relative; height: 5px; border-radius: 3px; background: var(--skeleton); }
-.range-bar span { position: absolute; top: 0; bottom: 0; border-radius: 3px; background: linear-gradient(90deg, var(--cold), var(--warm)); }
+.range-bar span { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
 
 /* Trend */
 .trend-intro { padding: 16px 0 6px; }
@@ -267,10 +267,13 @@ section.block + section.block { border-top: 1px solid var(--rule); }
 .trend-table td { padding: 8px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
 .trend-table td.num, .trend-table th.num { text-align: right; }
 .trend-table tr.unsure td { color: var(--text-2); }
-.trend-table .warm { color: var(--warm); font-weight: 600; }
-.trend-table .cold { color: var(--cold); font-weight: 600; }
+/* --t comes from the fixed temperature scale; darkened/lightened for legible text. */
+.trend-table .temp { color: color-mix(in srgb, var(--t) 78%, #000); font-weight: 600; }
+@media (prefers-color-scheme: dark) {
+  .trend-table .temp { color: color-mix(in srgb, var(--t) 80%, #fff); }
+}
 .trend-table .sun { color: var(--sun); }
-.trend-table tr.unsure .warm, .trend-table tr.unsure .cold { font-weight: 400; }
+.trend-table tr.unsure .temp { font-weight: 400; }
 .conf { display: inline-flex; gap: 2px; vertical-align: 1px; }
 .conf b { width: 5px; height: 10px; border-radius: 1px; background: var(--rule); }
 .conf b.on { background: var(--text-2); }

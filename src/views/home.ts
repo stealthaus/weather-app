@@ -4,6 +4,7 @@ import { deg, escapeHtml, localDate, localHour, num, shortDate, titleCase, weekd
 import { ICON_RANK, wxIcon, wxLabel } from '../lib/icons';
 import type { Place } from '../lib/places';
 import { daylightHours, sunshineByDay } from '../lib/sun';
+import { tempColor, tempGradient } from '../lib/tempscale';
 import { attribution, showError, skeleton } from '../lib/ui';
 
 interface DaySummary {
@@ -121,7 +122,7 @@ function dayList(days: DaySummary[], today: string) {
         <span class="ds" title="${d.sunHours != null ? `${num(d.sunHours, 1)} von ${num(d.dayHours, 1)} Stunden Sonne` : ''}">${d.sunShare != null ? `${Math.round(d.sunShare * 100)} %` : ''}</span>
         <span class="dp">${d.prob != null && d.prob >= 20 ? `${d.prob} %` : ''}</span>
         <span class="range"><span class="lo">${deg(d.min)}</span>
-          <span class="range-bar"><span style="left:${((d.min - lo) / span) * 100}%;right:${((hi - d.max) / span) * 100}%"></span></span>
+          <span class="range-bar"><span style="left:${((d.min - lo) / span) * 100}%;right:${((hi - d.max) / span) * 100}%;background:${tempGradient(d.min, d.max)}"></span></span>
           <span class="hi">${deg(d.max)}</span></span>
       </li>`,
     )
@@ -142,6 +143,7 @@ function hourlyChart(canvas: HTMLCanvasElement, hours: HourlyWeather[]) {
           label: 'Temperatur',
           data: hours.map((h) => h.temperature),
           borderColor: c.warm,
+          segment: { borderColor: (ctx) => tempColor((ctx.p0.parsed.y + ctx.p1.parsed.y) / 2) },
           borderWidth: 2,
           pointRadius: 0,
           tension: 0.35,

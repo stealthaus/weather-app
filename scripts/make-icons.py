@@ -1,16 +1,18 @@
-"""Renders the app icons (synthwave sun with a neon cloud over a grid) into public/icons/. Requires Pillow."""
+"""Renders the app icons (synthwave sun with a chrome temperature over a grid) into public/icons/.
+Requires Pillow and the Orbitron font from node_modules (npm install)."""
 from pathlib import Path
-from PIL import Image, ImageChops, ImageDraw, ImageFilter
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 S = 1024
-OUT = Path(__file__).resolve().parent.parent / "public" / "icons"
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "public" / "icons"
+FONT = ROOT / "node_modules" / "@fontsource" / "orbitron" / "files" / "orbitron-latin-900-normal.woff"
 
 SKY = [(0.0, "#0b0221"), (0.45, "#2b0b55"), (0.8, "#6b1468"), (1.0, "#ff3d8b")]
 SUN = [(0.0, "#ffe45e"), (0.5, "#ff9a3d"), (1.0, "#ff2e88")]
 PINK = (255, 47, 214)
-CYAN = (45, 226, 230)
-# Cloud as a box of width 1: base bar plus three bumps, (x, y, r) in cloud widths.
-BUMPS = [(0.28, 0.36, 0.2), (0.56, 0.25, 0.25), (0.81, 0.4, 0.16)]
+# Same chrome as the temperature on the home screen.
+CHROME = [(0.0, "#ffffff"), (0.44, "#bfe9ff"), (0.5, "#3a1d7a"), (0.56, "#ff7bd5"), (1.0, "#fff3fb")]
 
 
 def rgb(h):
@@ -25,17 +27,6 @@ def gradient(stops, t):
     return rgb(stops[-1][1])
 
 
-def cloud_mask(x0, y0, cw, grow=0):
-    """Cloud silhouette `cw` pixels wide with its top-left at (x0, y0), widened by `grow` pixels."""
-    m = Image.new("L", (S, S), 0)
-    d = ImageDraw.Draw(m)
-    d.rounded_rectangle([x0 - grow, y0 + 0.32 * cw - grow, x0 + cw + grow, y0 + 0.56 * cw + grow], radius=0.11 * cw + grow, fill=255)
-    for bx, by, br in BUMPS:
-        cx, cy, r = x0 + bx * cw, y0 + by * cw, br * cw + grow
-        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=255)
-    return m
-
-
 def render(maskable=False, small=False):
     """`maskable` keeps the motif inside the safe zone; `small` uses fewer, thicker lines for the favicon."""
     horizon = int(S * 0.68)
@@ -46,7 +37,7 @@ def render(maskable=False, small=False):
 
     # Sun: vertical gradient, cut into stripes below its centre, clipped at the horizon.
     r = int(S * (0.25 if maskable else 0.31))
-    cx, cy = int(S * (0.42 if maskable else 0.38)), horizon - int(r * 0.72)
+    cx, cy = S // 2, horizon - int(r * 0.72)
     sun = Image.new("RGB", (S, S))
     sd = ImageDraw.Draw(sun)
     for y in range(cy - r, cy + r):
@@ -80,14 +71,32 @@ def render(maskable=False, small=False):
     halo = lines.filter(ImageFilter.GaussianBlur(w * 1.5))
     img.paste(Image.new("RGB", (S, S), PINK), (0, 0), ImageChops.lighter(halo, lines))
 
-    # Neon cloud in front of the sun, so the icon reads as weather.
-    cw = S * (0.42 if maskable else 0.52)
-    x0, y0 = cx - r * 0.05, cy - cw * 0.2
-    stroke = S * (0.045 if small else 0.022)
-    outer = cloud_mask(x0, y0, cw, stroke)
-    img.paste(Image.new("RGB", (S, S), CYAN), (0, 0), outer.filter(ImageFilter.GaussianBlur(stroke * 1.6)))
-    img.paste(Image.new("RGB", (S, S), CYAN), (0, 0), outer)
-    img.paste(Image.new("RGB", (S, S), "#14052c"), (0, 0), cloud_mask(x0, y0, cw))
+    # Chrome "17°" on the sun, so the icon reads as weather. Letters are spaced by hand,
+    # since Orbitron's "1" and "7" touch at this weight.
+    text, tw = "17°", S * (0.56 if maskable else 0.84 if small else 0.7)
+    stroke = int(S * (0.03 if small else 0.016))
+    font = ImageFont.truetype(str(FONT), 400)
+    gap = font.size * 0.1
+    width = sum(font.getlength(ch) for ch in text) + gap * (len(text) - 1)
+    font = ImageFont.truetype(str(FONT), int(400 * tw / width))
+    gap = font.size * 0.1
+    fill, outline = Image.new("L", (S, S), 0), Image.new("L", (S, S), 0)
+    x = 0
+    for ch in text:
+        ImageDraw.Draw(fill).text((x, S / 2), ch, font=font, anchor="ls", fill=255)
+        ImageDraw.Draw(outline).text((x, S / 2), ch, font=font, anchor="ls", fill=255, stroke_width=stroke, stroke_fill=255)
+        x += font.getlength(ch) + gap
+    l, t, rr, b = fill.getbbox()
+    dx, dy = int(cx - (l + rr) / 2), int(cy - r * 0.08 - (t + b) / 2)
+    fill, outline = ImageChops.offset(fill, dx, dy), ImageChops.offset(outline, dx, dy)
+    img.paste(Image.new("RGB", (S, S), PINK), (0, 0), outline.filter(ImageFilter.GaussianBlur(stroke * 2.5)))
+    img.paste(Image.new("RGB", (S, S), "#1a0533"), (0, 0), outline)
+    top, bottom = fill.getbbox()[1], fill.getbbox()[3]
+    chrome = Image.new("RGB", (S, S))
+    cd = ImageDraw.Draw(chrome)
+    for y in range(top, bottom):
+        cd.line([(0, y), (S, y)], fill=gradient(CHROME, (y - top) / (bottom - top)))
+    img.paste(chrome, (0, 0), fill)
     return img
 
 

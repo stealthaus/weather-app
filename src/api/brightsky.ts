@@ -36,6 +36,8 @@ export interface HourlyWeather {
   wind_speed: number | null;
   wind_gust_speed: number | null;
   cloud_cover: number | null;
+  /** Minutes of sunshine in the hour ending at `timestamp`. */
+  sunshine: number | null;
   condition: string | null;
   icon: string | null;
 }
@@ -46,15 +48,17 @@ export async function currentWeather(lat: number, lon: number, tz: string) {
   );
 }
 
-/** Hourly MOSMIX forecast (plus recent observations) for the next ~10 days. */
+/**
+ * Hourly weather from local midnight today for ~10 days: station observations for the
+ * hours already past, DWD MOSMIX forecast for the rest (Bright Sky merges both).
+ */
 export async function forecast(lat: number, lon: number, tz: string) {
-  const now = new Date();
-  const from = new Date(now.getTime() - 60 * 60 * 1000);
-  const to = new Date(now.getTime() + 11 * 24 * 60 * 60 * 1000);
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date());
+  const to = new Date(Date.now() + 11 * 24 * 60 * 60 * 1000).toISOString();
   const res = await getJson<{ weather: HourlyWeather[]; sources: Source[] }>(
-    `${BASE}/weather?lat=${lat}&lon=${lon}&date=${from.toISOString()}&last_date=${to.toISOString()}&tz=${encodeURIComponent(tz)}`,
+    `${BASE}/weather?lat=${lat}&lon=${lon}&date=${today}&last_date=${to}&tz=${encodeURIComponent(tz)}`,
   );
-  // Keep forecast rows only so all hours come from the same MOSMIX station.
-  const fc = new Set(res.sources.filter((s) => s.observation_type === 'forecast').map((s) => s.id));
-  return { weather: res.weather.filter((w) => fc.has(w.source_id)), sources: res.sources };
+  const seen = new Set<string>();
+  const weather = res.weather.filter((w) => !seen.has(w.timestamp) && seen.add(w.timestamp));
+  return { weather, sources: res.sources };
 }

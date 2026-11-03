@@ -12,6 +12,7 @@
   --cold-band: rgba(133, 183, 235, 0.5);
   --rain: #378add;
   --rain-soft: rgba(55, 138, 221, 0.28);
+  --sun: #a86b00;
   --uncertain: rgba(28, 28, 26, 0.045);
   --danger: #a32d2d;
   --skeleton: #e9e7e0;
@@ -36,6 +37,7 @@
     --cold-band: rgba(55, 138, 221, 0.36);
     --rain: #5ea3e6;
     --rain-soft: rgba(94, 163, 230, 0.3);
+    --sun: #e3b341;
     --uncertain: rgba(237, 235, 228, 0.05);
     --danger: #f09595;
     --skeleton: #2a2a28;
@@ -213,7 +215,7 @@ section.block + section.block { border-top: 1px solid var(--rule); }
 .days { list-style: none; margin: 0; padding: 0; }
 .day {
   display: grid;
-  grid-template-columns: 54px 28px 44px minmax(0, 1fr);
+  grid-template-columns: 50px 26px 36px 36px minmax(0, 1fr);
   align-items: center;
   gap: 10px;
   padding: 9px 0;
@@ -224,7 +226,11 @@ section.block + section.block { border-top: 1px solid var(--rule); }
 .day .dname { font-weight: 600; }
 .day .dname small { display: block; font-weight: 400; font-size: 11px; color: var(--text-2); }
 .day .dp { font-size: 12px; color: var(--rain); text-align: right; }
-.range { display: grid; grid-template-columns: 30px minmax(0, 1fr) 30px; gap: 8px; align-items: center; }
+.day .ds { font-size: 12px; color: var(--sun); text-align: right; }
+.day-legend { font-size: 11px; color: var(--text-3); margin: -4px 0 4px; }
+.sun-key { color: var(--sun); font-weight: 600; }
+.rain-key { color: var(--rain); font-weight: 600; }
+.range { display: grid; grid-template-columns: 28px minmax(0, 1fr) 30px; gap: 6px; align-items: center; }
 .range .lo { color: var(--text-2); text-align: right; }
 .range .hi { text-align: left; font-weight: 600; }
 .range-bar { position: relative; height: 5px; border-radius: 3px; background: var(--skeleton); }

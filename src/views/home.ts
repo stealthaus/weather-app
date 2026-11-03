@@ -3,6 +3,7 @@ import { baseFont, Chart, palette } from '../lib/chart';
 import { deg, escapeHtml, localDate, localHour, num, shortDate, titleCase, weekday, windDir } from '../lib/format';
 import { ICON_RANK, wxIcon, wxLabel } from '../lib/icons';
 import type { Place } from '../lib/places';
+import { daylightHours } from '../lib/sun';
 import { attribution, showError, skeleton } from '../lib/ui';
 
 interface DaySummary {
@@ -12,9 +13,13 @@ interface DaySummary {
   icon: string | null;
   precip: number;
   prob: number | null;
+  /** Hours of sunshine, length of the day and their ratio (0..1); null if the day is incomplete. */
+  sunHours: number | null;
+  dayHours: number;
+  sunShare: number | null;
 }
 
-function summarizeDays(hours: HourlyWeather[]): DaySummary[] {
+function summarizeDays(hours: HourlyWeather[], lat: number): DaySummary[] {
   const byDate = new Map<string, HourlyWeather[]>();
   for (const h of hours) {
     const d = localDate(h.timestamp);
@@ -34,6 +39,9 @@ function summarizeDays(hours: HourlyWeather[]): DaySummary[] {
     const severe = ranked.find(([, c]) => c >= 3);
     const frequent = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
     const probs = list.map((h) => h.precipitation_probability).filter((p): p is number => p != null);
+    const sun = list.map((h) => h.sunshine).filter((m): m is number => m != null);
+    const sunHours = sun.length >= 20 ? sun.reduce((a, b) => a + b, 0) / 60 : null;
+    const dayHours = daylightHours(lat, date);
     days.push({
       date,
       min: Math.min(...temps),
@@ -41,6 +49,9 @@ function summarizeDays(hours: HourlyWeather[]): DaySummary[] {
       icon: (severe ?? frequent)?.[0]?.replace('-night', '-day') ?? null,
       precip: list.reduce((s, h) => s + (h.precipitation ?? 0), 0),
       prob: probs.length ? Math.max(...probs) : null,
+      sunHours,
+      dayHours,
+      sunShare: sunHours != null && dayHours > 0 ? Math.min(1, sunHours / dayHours) : null,
     });
   });
   return days;
@@ -55,6 +66,9 @@ function nowBlock(cur: CurrentWeather | null, first: HourlyWeather, today: DaySu
   const gust = cur?.wind_gust_speed_10 ?? first.wind_gust_speed;
   if (wind != null) facts.push(['Wind', `${num(wind)} km/h ${windDir(cur?.wind_direction_10)}`]);
   if (gust != null) facts.push(['Böen', `${num(gust)} km/h`]);
+  if (today?.sunShare != null) {
+    facts.push(['Sonne heute', `${num(today.sunHours, 1)} von ${num(today.dayHours, 1)} h · ${Math.round(today.sunShare * 100)} %`]);
+  }
   if (cur?.relative_humidity != null) facts.push(['Feuchte', `${num(cur.relative_humidity)} %`]);
   if (cur?.pressure_msl != null) facts.push(['Luftdruck', `${num(cur.pressure_msl)} hPa`]);
   if (precip != null) facts.push(['Niederschlag 1 h', `${num(precip, 1)} mm`]);
@@ -105,6 +119,7 @@ function dayList(days: DaySummary[], today: string) {
       (d) => `<li class="day">
         <span class="dname">${weekday(d.date, today)}<small>${shortDate(d.date)}</small></span>
         ${wxIcon(d.icon)}
+        <span class="ds" title="${d.sunHours != null ? `${num(d.sunHours, 1)} von ${num(d.dayHours, 1)} Stunden Sonne` : ''}">${d.sunShare != null ? `${Math.round(d.sunShare * 100)} %` : ''}</span>
         <span class="dp">${d.prob != null && d.prob >= 20 ? `${d.prob} %` : ''}</span>
         <span class="range"><span class="lo">${deg(d.min)}</span>
           <span class="range-bar"><span style="left:${((d.min - lo) / span) * 100}%;right:${((hi - d.max) / span) * 100}%"></span></span>
@@ -200,7 +215,7 @@ export function mountHome(el: HTMLElement, place: Place): () => void {
       if (!upcoming.length) throw new Error('Für diesen Ort liegt keine Vorhersage vor.');
       const next48 = upcoming.slice(0, 48);
       const todayYmd = localDate(upcoming[0].timestamp);
-      const days = summarizeDays(fc.weather).slice(0, 10);
+      const days = summarizeDays(fc.weather, place.lat).slice(0, 10);
       const station = cur?.sources.find((s) => s.id === cur.weather.source_id);
       const fcStation = fc.sources.find((s) => s.observation_type === 'forecast');
 
@@ -213,6 +228,7 @@ export function mountHome(el: HTMLElement, place: Place): () => void {
         </section>
         <section class="block">
           <div class="block-head"><p class="label">Nächste Tage · DWD MOSMIX</p><a href="#/trend">14-Tage-Trend →</a></div>
+          <div class="day-legend"><span class="sun-key">Sonne</span> Anteil der Tageslänge · <span class="rain-key">Regen</span> höchste Stundenwahrscheinlichkeit</div>
           ${dayList(days, todayYmd)}
         </section>
         ${attribution(['dwd', 'brightsky'])}

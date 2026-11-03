@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Wetter</title>
+    <meta name="description" content="Persönliche Wetter-App mit DWD-Vorhersage, Regenradar und 14-Tage-Trend" />
+    <meta name="theme-color" content="#f6f5f1" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#171716" media="(prefers-color-scheme: dark)" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Wetter" />
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png" />
+    <link rel="manifest" href="manifest.webmanifest" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <button class="place" id="place-btn" type="button" aria-label="Ort wählen">
+          <span class="place-name" id="place-name">Ort wählen</span>
+          <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+        </button>
+        <span class="topbar-meta" id="topbar-meta"></span>
+      </header>
+      <main id="view" tabindex="-1"></main>
+      <nav class="tabbar" aria-label="Ansichten">
+        <a href="#/" data-route="home">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11l8-7 8 7v9h-5v-6H9v6H4z" /></svg>
+          <span>Jetzt</span>
+        </a>
+        <a href="#/radar" data-route="radar">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="4" /><path d="M12 12l6-6" /></svg>
+          <span>Radar</span>
+        </a>
+        <a href="#/trend" data-route="trend">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17l5-6 4 3 4-6 5 4" /><path d="M3 21h18" /></svg>
+          <span>14 Tage</span>
+        </a>
+      </nav>
+    </div>
+    <div id="sheet-root"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

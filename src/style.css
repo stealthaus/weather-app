@@ -13,6 +13,7 @@
   --rain: #378add;
   --rain-soft: rgba(55, 138, 221, 0.28);
   --sun: #a86b00;
+  --sun-soft: rgba(212, 154, 18, 0.35);
   --uncertain: rgba(28, 28, 26, 0.045);
   --danger: #a32d2d;
   --skeleton: #e9e7e0;
@@ -38,6 +39,7 @@
     --rain: #5ea3e6;
     --rain-soft: rgba(94, 163, 230, 0.3);
     --sun: #e3b341;
+    --sun-soft: rgba(227, 179, 65, 0.3);
     --uncertain: rgba(237, 235, 228, 0.05);
     --danger: #f09595;
     --skeleton: #2a2a28;
@@ -254,6 +256,7 @@ section.block + section.block { border-top: 1px solid var(--rule); }
   color: var(--text-2);
   cursor: pointer;
 }
+.seg-small button { padding: 3px 8px; font-size: 12px; }
 .seg button + button { border-left: 1px solid var(--rule); }
 .seg button[aria-pressed='true'] { background: var(--text); color: var(--bg); }
 .controls { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 10px 0 4px; }
@@ -266,6 +269,7 @@ section.block + section.block { border-top: 1px solid var(--rule); }
 .trend-table tr.unsure td { color: var(--text-2); }
 .trend-table .warm { color: var(--warm); font-weight: 600; }
 .trend-table .cold { color: var(--cold); font-weight: 600; }
+.trend-table .sun { color: var(--sun); }
 .trend-table tr.unsure .warm, .trend-table tr.unsure .cold { font-weight: 400; }
 .conf { display: inline-flex; gap: 2px; vertical-align: 1px; }
 .conf b { width: 5px; height: 10px; border-radius: 1px; background: var(--rule); }

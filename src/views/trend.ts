@@ -1,8 +1,10 @@
 import type { Plugin } from 'chart.js';
-import { computeTrend, loadEnsemble, type ModelChoice, type RainThreshold, type RawEnsemble, type TrendDay } from '../api/ensemble';
+import { forecast } from '../api/brightsky';
+import { computeTrend, loadEnsemble, type Band, type ModelChoice, type RainThreshold, type RawEnsemble, type TrendDay } from '../api/ensemble';
 import { baseFont, Chart, palette } from '../lib/chart';
 import { deg, escapeHtml, num, shortDate, weekday } from '../lib/format';
 import type { Place } from '../lib/places';
+import { sunshineByDay, type DaySun } from '../lib/sun';
 import { attribution, showError, skeleton } from '../lib/ui';
 
 /** From this day index on (day 10) only ranges are shown, no single values. */
@@ -10,6 +12,10 @@ const TENDENCY_FROM = 9;
 
 const PREF_MODEL = 'wx.trend.model';
 const PREF_THRESHOLD = 'wx.trend.threshold';
+const PREF_SUN = 'wx.trend.sun';
+
+/** DWD MOSMIX (statistically calibrated on stations, 10 days) or raw ensemble output (15 days, with spread). */
+type SunSource = 'dwd' | 'ensemble';
 
 function pref<T extends string>(key: string, fallback: T): T {
   try {
@@ -57,8 +63,8 @@ const tendencyZone = (label: boolean): Plugin<'line' | 'bar'> => ({
   },
 });
 
-/** Draws P10–P90 whiskers on top of the precipitation median bars. */
-function whiskers(days: TrendDay[]): Plugin<'bar'> {
+/** Draws P10–P90 whiskers on top of median bars; `ranges` holds [p10, p90] per bar. */
+function whiskers(ranges: ([number, number] | null)[]): Plugin<'bar'> {
   return {
     id: 'whiskers',
     afterDatasetsDraw(chart) {
@@ -70,11 +76,11 @@ function whiskers(days: TrendDay[]): Plugin<'bar'> {
       ctx.strokeStyle = c.text2;
       ctx.lineWidth = 1.2;
       meta.data.forEach((bar, i) => {
-        const d = days[i];
-        if (!d || d.precip.p90 < 0.1) return;
+        const r = ranges[i];
+        if (!r) return;
         const x = bar.x;
-        const y1 = y.getPixelForValue(d.precip.p10);
-        const y2 = y.getPixelForValue(d.precip.p90);
+        const y1 = y.getPixelForValue(r[0]);
+        const y2 = y.getPixelForValue(r[1]);
         ctx.beginPath();
         ctx.moveTo(x, y1);
         ctx.lineTo(x, y2);
@@ -196,7 +202,7 @@ function rainChart(canvas: HTMLCanvasElement, days: TrendDay[], threshold: RainT
         },
       ],
     },
-    plugins: [tendencyZone(false) as Plugin<'bar'>, whiskers(days)],
+    plugins: [tendencyZone(false) as Plugin<'bar'>, whiskers(days.map((d) => (d.precip.p90 < 0.1 ? null : [d.precip.p10, d.precip.p90])))],
     options: {
       responsive: true,
       maintainAspectRatio: false,
@@ -229,6 +235,53 @@ function rainChart(canvas: HTMLCanvasElement, days: TrendDay[], threshold: RainT
   });
 }
 
+function sunChart(canvas: HTMLCanvasElement, days: TrendDay[], sun: (Band | null)[], source: SunSource) {
+  const c = palette();
+  const pct = (v: number) => Math.round(v * 100);
+  return new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels: labels(days),
+      datasets: [
+        {
+          data: sun.map((b) => (b ? pct(b.p50) : null)),
+          backgroundColor: days.map((_, i) => (i >= TENDENCY_FROM ? c.sunSoft : c.sun)),
+          barPercentage: 0.55,
+        },
+      ],
+    },
+    plugins: [tendencyZone(false) as Plugin<'bar'>, whiskers(sun.map((b) => (b && source === 'ensemble' ? [pct(b.p10), pct(b.p90)] : null)))],
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        tooltip: {
+          callbacks: {
+            title: (items) => {
+              const d = days[items[0].dataIndex];
+              return `${weekday(d.date)} ${shortDate(d.date)}`;
+            },
+            label: (item) => {
+              const b = sun[item.dataIndex];
+              if (!b) return '';
+              return source === 'ensemble'
+                ? ` Sonne: ${pct(b.p50)} % der Tageslänge (${pct(b.p10)} bis ${pct(b.p90)} %)`
+                : ` Sonne: ${pct(b.p50)} % der Tageslänge (DWD MOSMIX)`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { grid: { display: false }, border: { color: c.text }, ticks: { autoSkip: false, maxRotation: 0, font: { size: 10 } } },
+        y: { min: 0, max: 100, grid: { color: c.rule }, border: { display: false }, ticks: { stepSize: 50, callback: (v) => `${v} %` }, afterFit: fixWidth },
+      },
+      layout: { padding: { right: AXIS_W } },
+    },
+  });
+}
+
 function confidence(d: TrendDay) {
   const spread = Math.max(d.tmax.p90 - d.tmax.p10, d.tmin.p90 - d.tmin.p10);
   const level = spread <= 3 ? 3 : spread <= 6 ? 2 : 1;
@@ -236,7 +289,16 @@ function confidence(d: TrendDay) {
   return `<span class="conf" title="Sicherheit ${text}" aria-label="Sicherheit ${text}">${[1, 2, 3].map((i) => `<b class="${i <= level ? 'on' : ''}"></b>`).join('')}</span>`;
 }
 
-function table(days: TrendDay[]) {
+function sunCell(sun: Band | null, exact: boolean, source: SunSource) {
+  if (!sun) return '–';
+  const pct = (v: number) => Math.round(v * 100);
+  if (source === 'dwd') return `<span class="sun">${pct(sun.p50)} %</span>`;
+  return exact
+    ? `<span class="sun">${pct(sun.p50)} %</span><br><span class="small muted">${pct(sun.p10)}…${pct(sun.p90)}</span>`
+    : `<span class="sun">${pct(sun.p10)}…${pct(sun.p90)} %</span>`;
+}
+
+function table(days: TrendDay[], sun: (Band | null)[], source: SunSource) {
   const today = days[0]?.date;
   const rows = days
     .map((d, i) => {
@@ -250,12 +312,13 @@ function table(days: TrendDay[]) {
         <td class="num">${t(d.tmax, 'warm')}</td>
         <td class="num">${t(d.tmin, 'cold')}</td>
         <td class="num">${Math.round(d.rainProb * 100)} %</td>
+        <td class="num">${sunCell(sun[i], exact, source)}</td>
         <td class="num">${confidence(d)}</td>
       </tr>`;
     })
     .join('');
   return `<table class="trend-table">
-    <thead><tr><th>Tag</th><th class="num">Max</th><th class="num">Min</th><th class="num">Regen</th><th class="num">Sicherh.</th></tr></thead>
+    <thead><tr><th>Tag</th><th class="num">Max</th><th class="num">Min</th><th class="num">Regen</th><th class="num">Sonne</th><th class="num">Sich.</th></tr></thead>
     <tbody>${rows}</tbody></table>`;
 }
 
@@ -265,6 +328,12 @@ export function mountTrend(el: HTMLElement, place: Place): () => void {
   let raw: RawEnsemble | null = null;
   let model = pref<ModelChoice>(PREF_MODEL, 'ecmwf');
   let threshold = Number(pref(PREF_THRESHOLD, '0.1')) as RainThreshold;
+  let sunSource = pref<SunSource>(PREF_SUN, 'dwd');
+  let dwdSun: Map<string, DaySun> | null = null;
+  const tz = place.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const dwdSunLoaded = forecast(place.lat, place.lon, tz)
+    .then((fc) => (dwdSun = sunshineByDay(fc.weather, place.lat)))
+    .catch(() => null);
 
   el.innerHTML = `
     <div class="trend-intro">
@@ -287,18 +356,32 @@ export function mountTrend(el: HTMLElement, place: Place): () => void {
   const syncButtons = () => {
     el.querySelectorAll<HTMLButtonElement>('[data-model]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.model === model)));
     el.querySelectorAll<HTMLButtonElement>('[data-th]').forEach((b) => b.setAttribute('aria-pressed', String(Number(b.dataset.th) === threshold)));
+    el.querySelectorAll<HTMLButtonElement>('[data-sun]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.sun === sunSource)));
   };
 
   const render = () => {
     charts.forEach((c) => c.destroy());
     charts = [];
     if (!raw) return;
-    const days = computeTrend(raw, threshold);
+    const days = computeTrend(raw, threshold, place.lat);
     if (!days.length) {
       body.innerHTML = '<div class="error">Für diesen Ort liefert das Ensemble keine Daten.</div>';
       return;
     }
     const members = days[0].members;
+    const sun: (Band | null)[] =
+      sunSource === 'ensemble'
+        ? days.map((d) => d.sun)
+        : days.map((d) => {
+            const v = dwdSun?.get(d.date)?.share;
+            return v == null ? null : { p10: v, p50: v, p90: v };
+          });
+    const sunNote =
+      sunSource === 'dwd'
+        ? dwdSun
+          ? '„Sonne“ stammt aus DWD MOSMIX (an Stationen kalibriert, reicht etwa 10 Tage) und ist die Sonnenscheindauer im Verhältnis zur Tageslänge.'
+          : '„Sonne“ aus DWD MOSMIX ist gerade nicht verfügbar.'
+        : '„Sonne“ ist die rohe Modell-Sonnenscheindauer der Ensemble-Läufe im Verhältnis zur Tageslänge. Sie fällt oft deutlich zu hoch aus.';
     body.innerHTML = `
       <section class="block">
         <div class="block-head"><p class="label">Temperatur · Höchst- und Tiefstwert</p></div>
@@ -319,20 +402,32 @@ export function mountTrend(el: HTMLElement, place: Place): () => void {
         </div>
       </section>
       <section class="block">
-        <div class="block-head"><p class="label">Tageswerte</p><span class="small muted">Median, darunter Spanne</span></div>
-        ${table(days)}
-        <p class="note">Ab Tag ${TENDENCY_FROM + 1} zeigt die App nur noch Spannen: Einzelwerte wären dort scheinbar genauer, als die Modelle rechnen können. „Regen“ ist der Anteil der ${members} Läufe mit mindestens ${num(threshold, threshold < 1 ? 1 : 0)} mm am Tag.${raw.icon ? ' ICON-EPS reicht nur etwa 7 Tage, danach rechnet nur ECMWF.' : ''}</p>
+        <div class="block-head"><p class="label">Sonne · Anteil der Tageslänge</p>
+          <div class="seg seg-small" role="group" aria-label="Quelle Sonnenschein">
+            <button type="button" data-sun="dwd">DWD</button>
+            <button type="button" data-sun="ensemble">Ensemble</button>
+          </div></div>
+        <div class="chart-box" style="height:130px"><canvas role="img" aria-label="Sonnenscheindauer als Anteil der Tageslänge"></canvas></div>
+        <div class="legend">
+          <span><i style="background:var(--sun)"></i>${sunSource === 'ensemble' ? 'Median, Strich = 10–90 %' : 'DWD MOSMIX, Tag 1–10'}</span>
+        </div>
       </section>
-      ${attribution(['openmeteo'])}`;
-    const [tc, rc] = body.querySelectorAll('canvas');
+      <section class="block">
+        <div class="block-head"><p class="label">Tageswerte</p><span class="small muted">Median, darunter Spanne</span></div>
+        ${table(days, sun, sunSource)}
+        <p class="note">Ab Tag ${TENDENCY_FROM + 1} zeigt die App nur noch Spannen: Einzelwerte wären dort scheinbar genauer, als die Modelle rechnen können. „Regen“ ist der Anteil der ${members} Läufe mit mindestens ${num(threshold, threshold < 1 ? 1 : 0)} mm am Tag. ${sunNote}${raw.icon ? ' ICON-EPS reicht nur etwa 7 Tage, danach rechnet nur ECMWF.' : ''}</p>
+      </section>
+      ${attribution(sunSource === 'dwd' ? ['openmeteo', 'dwd', 'brightsky'] : ['openmeteo'])}`;
+    const [tc, rc, sc] = body.querySelectorAll('canvas');
     baseFont();
-    charts.push(tempChart(tc, days), rainChart(rc, days, threshold));
+    charts.push(tempChart(tc, days), rainChart(rc, days, threshold), sunChart(sc, days, sun, sunSource));
+    syncButtons();
   };
 
   const load = async () => {
     body.innerHTML = `${skeleton(250, '100%', 18)}${skeleton(160, '100%', 24)}${skeleton(300, '100%', 24)}`;
     try {
-      const r = await loadEnsemble(place.lat, place.lon, model === 'ecmwf+icon');
+      const [r] = await Promise.all([loadEnsemble(place.lat, place.lon, model === 'ecmwf+icon'), dwdSunLoaded]);
       if (!alive) return;
       raw = r;
       render();
@@ -353,6 +448,10 @@ export function mountTrend(el: HTMLElement, place: Place): () => void {
       threshold = Number(b.dataset.th) as RainThreshold;
       setPref(PREF_THRESHOLD, String(threshold));
       syncButtons();
+      render();
+    } else if (b.dataset.sun && b.dataset.sun !== sunSource) {
+      sunSource = b.dataset.sun as SunSource;
+      setPref(PREF_SUN, sunSource);
       render();
     }
   });

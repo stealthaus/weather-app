@@ -18,3 +18,32 @@ export function daylightHours(lat: number, ymd: string): number {
   if (cosH >= 1) return 0; // polar night
   return (2 * Math.acos(cosH)) / RAD / 15;
 }
+
+export interface DaySun {
+  hours: number;
+  dayHours: number;
+  /** Sunshine hours / day length, 0..1 */
+  share: number;
+}
+
+/**
+ * Sums hourly sunshine minutes (Bright Sky / MOSMIX) per local date and relates them
+ * to the day length. Days with fewer than 20 hourly values are left out as incomplete.
+ */
+export function sunshineByDay(hours: { timestamp: string; sunshine: number | null }[], lat: number): Map<string, DaySun> {
+  const minutes = new Map<string, number[]>();
+  for (const h of hours) {
+    if (h.sunshine == null) continue;
+    const date = h.timestamp.slice(0, 10);
+    if (!minutes.has(date)) minutes.set(date, []);
+    minutes.get(date)!.push(h.sunshine);
+  }
+  const out = new Map<string, DaySun>();
+  minutes.forEach((list, date) => {
+    if (list.length < 20) return;
+    const sunHours = list.reduce((a, b) => a + b, 0) / 60;
+    const dayHours = daylightHours(lat, date);
+    out.set(date, { hours: sunHours, dayHours, share: dayHours > 0 ? Math.min(1, sunHours / dayHours) : 0 });
+  });
+  return out;
+}

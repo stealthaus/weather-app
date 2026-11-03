@@ -3,7 +3,7 @@ import { baseFont, Chart, palette } from '../lib/chart';
 import { deg, escapeHtml, localDate, localHour, num, shortDate, titleCase, weekday, windDir } from '../lib/format';
 import { ICON_RANK, wxIcon, wxLabel } from '../lib/icons';
 import type { Place } from '../lib/places';
-import { daylightHours } from '../lib/sun';
+import { daylightHours, sunshineByDay } from '../lib/sun';
 import { attribution, showError, skeleton } from '../lib/ui';
 
 interface DaySummary {
@@ -26,6 +26,7 @@ function summarizeDays(hours: HourlyWeather[], lat: number): DaySummary[] {
     if (!byDate.has(d)) byDate.set(d, []);
     byDate.get(d)!.push(h);
   }
+  const sunByDay = sunshineByDay(hours, lat);
   const days: DaySummary[] = [];
   byDate.forEach((list, date) => {
     const temps = list.map((h) => h.temperature).filter((t): t is number => t != null);
@@ -39,9 +40,7 @@ function summarizeDays(hours: HourlyWeather[], lat: number): DaySummary[] {
     const severe = ranked.find(([, c]) => c >= 3);
     const frequent = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
     const probs = list.map((h) => h.precipitation_probability).filter((p): p is number => p != null);
-    const sun = list.map((h) => h.sunshine).filter((m): m is number => m != null);
-    const sunHours = sun.length >= 20 ? sun.reduce((a, b) => a + b, 0) / 60 : null;
-    const dayHours = daylightHours(lat, date);
+    const sun = sunByDay.get(date);
     days.push({
       date,
       min: Math.min(...temps),
@@ -49,9 +48,9 @@ function summarizeDays(hours: HourlyWeather[], lat: number): DaySummary[] {
       icon: (severe ?? frequent)?.[0]?.replace('-night', '-day') ?? null,
       precip: list.reduce((s, h) => s + (h.precipitation ?? 0), 0),
       prob: probs.length ? Math.max(...probs) : null,
-      sunHours,
-      dayHours,
-      sunShare: sunHours != null && dayHours > 0 ? Math.min(1, sunHours / dayHours) : null,
+      sunHours: sun?.hours ?? null,
+      dayHours: sun?.dayHours ?? daylightHours(lat, date),
+      sunShare: sun?.share ?? null,
     });
   });
   return days;

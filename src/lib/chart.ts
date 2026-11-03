@@ -27,6 +27,8 @@ export function palette() {
     coldBand: cssVar('--cold-band'),
     rain: cssVar('--rain'),
     rainSoft: cssVar('--rain-soft'),
+    sun: cssVar('--sun'),
+    sunSoft: cssVar('--sun-soft'),
     uncertain: cssVar('--uncertain'),
     surface: cssVar('--surface'),
     font: cssVar('--font'),

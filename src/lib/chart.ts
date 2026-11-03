@@ -14,7 +14,7 @@ import { cssVar } from './format';
 
 Chart.register(LineController, BarController, LineElement, BarElement, PointElement, CategoryScale, LinearScale, Filler, Tooltip);
 
-/** Colours resolved from CSS variables so charts follow light/dark mode. */
+/** Colours resolved from CSS variables so charts follow the theme. */
 export function palette() {
   return {
     text: cssVar('--text'),

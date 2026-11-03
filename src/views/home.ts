@@ -3,7 +3,8 @@ import { baseFont, Chart, palette } from '../lib/chart';
 import { deg, escapeHtml, localDate, localHour, num, shortDate, titleCase, weekday, windDir } from '../lib/format';
 import { ICON_RANK, wxIcon, wxLabel } from '../lib/icons';
 import type { Place } from '../lib/places';
-import { daylightHours, sunshineByDay } from '../lib/sun';
+import { heroScene } from '../lib/scene';
+import { daylightHours, isDaytime, sunshineByDay } from '../lib/sun';
 import { tempColor, tempGradient } from '../lib/tempscale';
 import { attribution, showError, skeleton } from '../lib/ui';
 
@@ -57,7 +58,7 @@ function summarizeDays(hours: HourlyWeather[], lat: number): DaySummary[] {
   return days;
 }
 
-function nowBlock(cur: CurrentWeather | null, first: HourlyWeather, today: DaySummary | undefined, station: Source | undefined, place: Place) {
+function nowBlock(cur: CurrentWeather | null, first: HourlyWeather, today: DaySummary | undefined, station: Source | undefined, place: Place, night: boolean) {
   const temp = cur?.temperature ?? first.temperature;
   const icon = cur?.icon ?? first.icon;
   const precip = cur?.precipitation_60 ?? first.precipitation;
@@ -80,13 +81,11 @@ function nowBlock(cur: CurrentWeather | null, first: HourlyWeather, today: DaySu
   const [whole, frac] = (temp != null ? temp.toFixed(1) : '–').split('.');
   return `
     <section class="now">
-      <div class="now-row">
-        <div>
-          <div class="now-temp">${whole === '-0' ? '0' : whole}${frac ? `<sup>,${frac}°</sup>` : ''}</div>
-          <div class="now-cond">${wxLabel(icon, precip)}</div>
-          ${today ? `<div class="now-hl">H ${deg(Math.max(today.max, temp ?? -99))} · T ${deg(Math.min(today.min, temp ?? 99))}${today.prob != null ? ` · Regen bis ${today.prob} %` : ''}</div>` : ''}
-        </div>
-        ${wxIcon(icon, 'now-icon')}
+      ${heroScene(icon, night)}
+      <div class="now-main">
+        <div class="now-temp">${whole === '-0' ? '0' : whole}${frac ? `<sup>,${frac}°</sup>` : ''}</div>
+        <div class="now-cond">${wxLabel(icon, precip)}</div>
+        ${today ? `<div class="now-hl">H ${deg(Math.max(today.max, temp ?? -99))} · T ${deg(Math.min(today.min, temp ?? 99))}${today.prob != null ? ` · Regen bis ${today.prob} %` : ''}</div>` : ''}
       </div>
       <dl class="facts">${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('')}</dl>
       <p class="source-note">${
@@ -221,7 +220,7 @@ export function mountHome(el: HTMLElement, place: Place): () => void {
       const fcStation = fc.sources.find((s) => s.observation_type === 'forecast');
 
       el.innerHTML = `
-        ${nowBlock(cur?.weather ?? null, upcoming[0], days.find((d) => d.date === todayYmd), station, place)}
+        ${nowBlock(cur?.weather ?? null, upcoming[0], days.find((d) => d.date === todayYmd), station, place, !isDaytime(place.lat, place.lon))}
         <section class="block">
           <div class="block-head"><p class="label">Nächste 48 Stunden</p><span class="small muted">Temperatur · Niederschlag</span></div>
           <div class="chart-box" style="height:150px"><canvas aria-label="Temperatur und Niederschlag der nächsten 48 Stunden" role="img"></canvas></div>

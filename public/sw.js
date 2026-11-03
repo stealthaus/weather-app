@@ -1,5 +1,5 @@
 // App-shell caching. Bump VERSION to drop old caches after larger changes.
-const VERSION = 'v1';
+const VERSION = 'v2';
 const SHELL = `shell-${VERSION}`;
 const DATA = `data-${VERSION}`;
 const PRECACHE = ['./', './manifest.webmanifest', './icons/apple-touch-icon.png', './icons/icon-192.png'];

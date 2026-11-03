@@ -57,9 +57,6 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && Date.now() - mountedAt > STALE_MS) render();
 });
 
-// Charts read colours from CSS variables, so redraw on light/dark switch.
-matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => route() !== 'radar' && render());
-
 render();
 if (!places.current) openPlaceSheet({ dismissable: false });
 

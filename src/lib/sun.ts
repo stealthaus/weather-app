@@ -47,3 +47,11 @@ export function sunshineByDay(hours: { timestamp: string; sunshine: number | nul
   });
   return out;
 }
+
+/** Whether the sun is up at `lon`/`lat` at time `at` (solar noon from longitude, ± a quarter hour). */
+export function isDaytime(lat: number, lon: number, at = new Date()): boolean {
+  const dayHours = daylightHours(lat, at.toISOString().slice(0, 10));
+  const utcHours = at.getUTCHours() + at.getUTCMinutes() / 60;
+  const fromNoon = ((utcHours - (12 - lon / 15) + 36) % 24) - 12;
+  return Math.abs(fromNoon) < dayHours / 2;
+}

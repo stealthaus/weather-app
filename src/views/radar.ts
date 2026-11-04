@@ -1,8 +1,8 @@
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { RADAR_DOMAIN, radarFrames, radarImageUrl, type RadarFrame } from '../api/radar';
-import { addBasemap, fitMinZoom, MAP_BOUNDS } from '../lib/basemap';
-import { contourCodes, LEVEL_COLORS, MODEL_PALETTE, paintCodes, RADAR_PALETTE } from '../lib/contour';
+import { GLOBAL_LAYER, globalTime, RADAR_DOMAIN, radarFrames, radarImageUrl, type RadarFrame } from '../api/radar';
+import { addBasemap, BASEMAP_ATTRIBUTION, fitMinZoom, MAP_BOUNDS } from '../lib/basemap';
+import { contourCodes, coverageMask, GLOBAL_PALETTE, LEVEL_COLORS, MODEL_PALETTE, paintCodes, RADAR_PALETTE, type Palette } from '../lib/contour';
 import { hhmm } from '../lib/format';
 import type { Place } from '../lib/places';
 
@@ -22,8 +22,11 @@ const PARALLEL = 4;
 const PAD = 0.2;
 /** Caps image size on large screens (server time and memory grow with the pixel count). */
 const MAX_PIXELS = 1_000_000;
+/** The ICON global grid is ~28 km, so its images can be coarser. */
+const GLOBAL_MAX_PIXELS = 400_000;
 
 const DOMAIN = L.latLngBounds([RADAR_DOMAIN.south, RADAR_DOMAIN.west], [RADAR_DOMAIN.north, RADAR_DOMAIN.east]);
+const WORLD = L.latLngBounds([-85, -180], [85, 180]);
 
 /** Area and resolution of one set of radar images. */
 interface View {
@@ -39,6 +42,23 @@ interface View {
 interface FrameData {
   view: View;
   codes: Uint8Array;
+}
+
+/** One image to download. */
+interface Job {
+  key: string;
+  layer: string;
+  time: Date;
+  view: View;
+  palette: Palette;
+}
+
+/** A canvas on the map that shows one loaded frame. */
+interface Layer {
+  canvas: HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
+  overlay: L.SVGOverlay;
+  shown: { view: View; img: ImageData } | null;
 }
 
 /** Faint neon grid that moves with the map. */
@@ -121,13 +141,15 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   const map = L.map(el.querySelector<HTMLElement>('#map')!, {
     zoomControl: false,
     attributionControl: true,
-    minZoom: 4,
+    minZoom: 2,
     maxZoom: 11,
     maxBounds: MAP_BOUNDS,
     maxBoundsViscosity: 1,
+    // At the zoom limit just stop; the bounce back looked like the map zooming in by itself.
+    bounceAtZoomLimits: false,
   }).setView([place.lat, place.lon], 8);
   map.attributionControl.setPrefix(false);
-  map.attributionControl.addAttribution('Karte: <a href="https://www.naturalearthdata.com">Natural Earth</a> · Radar © <a href="https://www.dwd.de">DWD</a>');
+  map.attributionControl.addAttribution(`${BASEMAP_ATTRIBUTION} · Radar © <a href="https://www.dwd.de">DWD</a>`);
 
   addBasemap(map, [place.lat, place.lon]);
   new GridLines({ tileSize: 128, zIndex: 2 }).addTo(map);
@@ -137,12 +159,21 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     keyboard: false,
   }).addTo(map);
 
-  // A single canvas shows the current frame. SVGOverlay positions any element like an image
-  // (including zoom animation), so it can carry the canvas.
-  const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = 1;
-  const ctx = canvas.getContext('2d')!;
-  const overlay = L.svgOverlay(canvas as unknown as SVGElement, DOMAIN, { interactive: false }).addTo(map);
+  // Two canvases show the current frame: ICON global below (whole world, coarse) and the radar or
+  // ICON-EU frame above (radar domain). SVGOverlay positions any element like an image (including
+  // zoom animation), so it can carry a canvas.
+  const layer = (): Layer => {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 1;
+    const overlay = L.svgOverlay(canvas as unknown as SVGElement, DOMAIN, { interactive: false }).addTo(map);
+    return { canvas, ctx: canvas.getContext('2d')!, overlay, shown: null };
+  };
+  const world = layer();
+  const fine = layer();
+  // Where the fine frame has data; cut out of the global layer so the rain is not shown twice.
+  const mask = document.createElement('canvas');
+  const mctx = mask.getContext('2d')!;
+  let maskImg: ImageData | null = null;
   // Scratch canvas to read the pixels of a downloaded image.
   const scratch = document.createElement('canvas');
   const sctx = scratch.getContext('2d', { willReadFrequently: true })!;
@@ -165,32 +196,58 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   /** Loaded frames by layer and time, so switching the step reuses what is already there. */
   const cache = new Map<string, FrameData>();
   const key = (f: RadarFrame) => `${f.layer}|${f.time.getTime()}`;
+  const worldKey = (f: RadarFrame) => `${GLOBAL_LAYER}|${globalTime(f.time).getTime()}`;
   let nowIdx = 0;
   let index = 0;
   let timer = 0;
   let alive = true;
   let view: View | null = null;
-  let shown: { view: View; img: ImageData } | null = null;
+  let worldView: View | null = null;
   /** Incremented on every reload; older downloads see the mismatch and stop. */
   let generation = 0;
   const inflight = new Set<HTMLImageElement>();
 
   // ---- drawing --------------------------------------------------------------
 
-  const paint = () => {
-    const d = frames[index] && cache.get(key(frames[index]));
+  /** Draws a loaded frame into a layer; false if there is nothing to draw. */
+  const draw = (l: Layer, d: FrameData | undefined): boolean => {
     if (!d) {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      return;
+      l.ctx.clearRect(0, 0, l.canvas.width, l.canvas.height);
+      return false;
     }
-    if (shown?.view !== d.view) {
-      canvas.width = d.view.w;
-      canvas.height = d.view.h;
-      overlay.setBounds(d.view.bounds);
-      shown = { view: d.view, img: ctx.createImageData(d.view.w, d.view.h) };
+    if (l.shown?.view !== d.view) {
+      l.canvas.width = d.view.w;
+      l.canvas.height = d.view.h;
+      l.overlay.setBounds(d.view.bounds);
+      l.shown = { view: d.view, img: l.ctx.createImageData(d.view.w, d.view.h) };
     }
-    paintCodes(d.codes, shown.img);
-    ctx.putImageData(shown.img, 0, 0);
+    paintCodes(d.codes, l.shown.img);
+    l.ctx.putImageData(l.shown.img, 0, 0);
+    return true;
+  };
+
+  const paint = () => {
+    const f = frames[index];
+    const d = f && cache.get(key(f));
+    const g = f && cache.get(worldKey(f));
+    draw(fine, d);
+    if (!draw(world, g) || !g || !d || d.view.zoom !== g.view.zoom) return;
+    const { w, h, px } = d.view;
+    if (mask.width !== w || mask.height !== h || !maskImg) {
+      mask.width = w;
+      mask.height = h;
+      maskImg = mctx.createImageData(w, h);
+    }
+    coverageMask(d.codes, w, h, f.model, maskImg);
+    mctx.putImageData(maskImg, 0, 0);
+    const gp = g.view.px;
+    const sx = g.view.w / (gp.max!.x - gp.min!.x);
+    const sy = g.view.h / (gp.max!.y - gp.min!.y);
+    const c = world.ctx;
+    c.globalCompositeOperation = 'destination-out';
+    c.imageSmoothingEnabled = false;
+    c.drawImage(mask, (px.min!.x - gp.min!.x) * sx, (px.min!.y - gp.min!.y) * sy, (px.max!.x - px.min!.x) * sx, (px.max!.y - px.min!.y) * sy);
+    c.globalCompositeOperation = 'source-over';
   };
 
   const show = (i: number) => {
@@ -223,14 +280,14 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     panel.progress.hidden = finished || bigLoader;
   };
 
-  /** Area to load for the current map view, clipped to the radar domain; null if nothing is visible. */
-  const neededView = (): View | null => {
+  /** Area to load for the current map view, clipped to `area`; null if nothing of it is visible. */
+  const neededView = (area: L.LatLngBounds, current: View | null, maxPixels: number): View | null => {
     const zoom = map.getZoom();
     const size = map.getSize();
     const pb = map.getPixelBounds();
     const pad = size.multiplyBy(PAD);
-    const dmin = map.project(DOMAIN.getNorthWest(), zoom);
-    const dmax = map.project(DOMAIN.getSouthEast(), zoom);
+    const dmin = map.project(area.getNorthWest(), zoom);
+    const dmax = map.project(area.getSouthEast(), zoom);
     const clip = (min: L.Point, max: L.Point) => {
       const a = L.point(Math.floor(Math.max(min.x, dmin.x)), Math.floor(Math.max(min.y, dmin.y)));
       const b = L.point(Math.ceil(Math.min(max.x, dmax.x)), Math.ceil(Math.min(max.y, dmax.y)));
@@ -239,11 +296,11 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     const visible = clip(pb.min!, pb.max!);
     if (!visible) return null;
     // The current images still cover the screen: keep them.
-    if (view && view.zoom === zoom && view.px.contains(visible)) return view;
+    if (current && current.zoom === zoom && current.px.contains(visible)) return current;
     const px = clip(pb.min!.subtract(pad), pb.max!.add(pad))!;
     const w0 = px.max!.x - px.min!.x;
     const h0 = px.max!.y - px.min!.y;
-    const scale = Math.min(1, Math.sqrt(MAX_PIXELS / (w0 * h0)));
+    const scale = Math.min(1, Math.sqrt(maxPixels / (w0 * h0)));
     return {
       zoom,
       px,
@@ -253,10 +310,11 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     };
   };
 
-  const fetchFrame = async (f: RadarFrame, v: View, gen: number) => {
+  const fetchFrame = async (job: Job, gen: number) => {
+    const v = job.view;
     const sw = L.CRS.EPSG3857.project(v.bounds.getSouthWest());
     const ne = L.CRS.EPSG3857.project(v.bounds.getNorthEast());
-    const url = radarImageUrl(f.layer, f.time, [sw.x, sw.y, ne.x, ne.y], v.w, v.h);
+    const url = radarImageUrl(job.layer, job.time, [sw.x, sw.y, ne.x, ne.y], v.w, v.h);
     // Some DWD backend nodes lag behind and answer with an XML error; retry a few times.
     for (let attempt = 0; attempt < 4; attempt++) {
       if (gen !== generation) return;
@@ -270,7 +328,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
           sctx.clearRect(0, 0, v.w, v.h);
         }
         sctx.drawImage(img, 0, 0);
-        cache.set(key(f), { view: v, codes: contourCodes(sctx.getImageData(0, 0, v.w, v.h), f.model ? MODEL_PALETTE : RADAR_PALETTE) });
+        cache.set(job.key, { view: v, codes: contourCodes(sctx.getImageData(0, 0, v.w, v.h), job.palette) });
         return;
       } catch {
         await sleep(400 * (attempt + 1));
@@ -278,32 +336,48 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     }
   };
 
-  /** Loads every frame that has no data for the current view yet. */
+  /** Loads every radar/ICON-EU frame and every ICON global image that has no data for the current view yet. */
   const sync = () => {
     if (!alive || !frames.length) return;
-    const v = neededView();
-    if (!v) return progress(1, 1);
-    view = v;
-    const todo = frames.filter((f) => cache.get(key(f))?.view !== v);
-    if (!todo.length) return progress(1, 1);
+    const v = neededView(DOMAIN, view, MAX_PIXELS);
+    const wv = neededView(WORLD, worldView, GLOBAL_MAX_PIXELS);
+    if (v) view = v;
+    if (wv) worldView = wv;
+    const jobs: Job[] = [];
+    if (v) {
+      for (const f of frames) {
+        if (cache.get(key(f))?.view !== v) jobs.push({ key: key(f), layer: f.layer, time: f.time, view: v, palette: f.model ? MODEL_PALETTE : RADAR_PALETTE });
+      }
+    }
+    if (wv) {
+      const seen = new Set<string>();
+      for (const f of frames) {
+        const k = worldKey(f);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        if (cache.get(k)?.view !== wv) jobs.push({ key: k, layer: GLOBAL_LAYER, time: globalTime(f.time), view: wv, palette: GLOBAL_PALETTE });
+      }
+    }
+    if (!jobs.length) return progress(1, 1);
 
     const gen = ++generation;
     inflight.forEach((img) => (img.src = ''));
     inflight.clear();
-    // The visible frame first, then in time order.
+    // What the visible frame needs first, then in time order.
     const current = frames[index];
-    todo.sort((a, b) => (a === current ? -1 : b === current ? 1 : a.time.getTime() - b.time.getTime()));
-    bigLoader = !cache.has(key(current));
-    const total = todo.length;
+    const now = new Set([key(current), worldKey(current)]);
+    jobs.sort((a, b) => Number(now.has(b.key)) - Number(now.has(a.key)) || a.time.getTime() - b.time.getTime());
+    bigLoader = !cache.has(v ? key(current) : worldKey(current));
+    const total = jobs.length;
     let done = 0;
     progress(0, total);
 
     const worker = async () => {
-      for (let f = todo.shift(); f && gen === generation; f = todo.shift()) {
-        await fetchFrame(f, v, gen);
+      for (let job = jobs.shift(); job && gen === generation; job = jobs.shift()) {
+        await fetchFrame(job, gen);
         if (gen !== generation || !alive) return;
         done++;
-        if (f === frames[index]) paint();
+        if (job.key === key(frames[index]) || job.key === worldKey(frames[index])) paint();
         progress(done, total);
       }
     };
@@ -354,7 +428,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     const next = await radarFrames(PAST_MIN, step, HORIZON_MIN[step]);
     if (!alive || req !== framesRequest) return;
     frames = next;
-    const keys = new Set(frames.map(key));
+    const keys = new Set([...frames.map(key), ...frames.map(worldKey)]);
     for (const k of cache.keys()) if (!keys.has(k)) cache.delete(k);
     nowIdx = frames.some((f) => f.forecast) ? Math.max(0, frames.findIndex((f) => f.forecast) - 1) : frames.length - 1;
     panel.bars.innerHTML = frames.map((f, i) => `<i class="${f.model ? 'fc md' : f.forecast ? 'fc' : ''}${i === nowIdx ? ' now' : ''}"></i>`).join('');

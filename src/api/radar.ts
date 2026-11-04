@@ -2,6 +2,9 @@ export const RADAR_WMS = 'https://maps.dwd.de/geoserver/dwd/wms';
 export const RADAR_LAYER = 'dwd:Radar_wn-product_1x1km_ger';
 /** ICON-EU precipitation of the past hour (~7 km grid), continues the forecast after the 2 h nowcast. */
 export const MODEL_LAYER = 'dwd:Icon-eu_reg00625_fd_sl_TOTPREC01H';
+/** ICON global precipitation of the past 6 hours (~28 km grid, every 3 h): fills the rest of the world. */
+export const GLOBAL_LAYER = 'dwd:Icon_reg025_fd_sl_TOTPREC06H';
+const GLOBAL_STEP_MS = 3 * 60 * 60 * 1000;
 // Layer-scoped capabilities are ~40 KB instead of ~1 MB for the whole workspace.
 const CAPABILITIES = 'https://maps.dwd.de/geoserver/dwd/Radar_wn-product_1x1km_ger/wms?service=WMS&version=1.3.0&request=GetCapabilities';
 const NOWCAST_MS = 2 * 60 * 60 * 1000;
@@ -24,6 +27,14 @@ export const DBZ_COLORS = ['#99FFFF', '#33FFFF', '#00CACA', '#009934', '#4DBF1A'
 
 /** mm/h colour scale (LAWA) of the ICON-EU layer: 0.1, 2, 5, 10, 15, 20, 25, 30, 40, 60, 80, 100, 130, 160 mm. */
 export const MODEL_COLORS = ['#C0C0C0', '#FEFEC0', '#FEFE5B', '#CFF200', '#A0D625', '#36C969', '#00D7D7', '#00A6DD', '#0000FE', '#9730C2', '#D926C7', '#FE0000', '#A00000', '#606060'];
+
+/** mm per 6 h colour scale of the ICON global layer: 0.1, 0.5, 1, 2, 5, 10, 15, 20, 25, 30, 35, 40, 50, 60, 70, 80, 90, 100, 150, 200, 300 mm. */
+export const GLOBAL_COLORS = ['#DCF7C3', '#B9F77C', '#00E601', '#00BF01', '#008017', '#33B9FF', '#007DFF', '#FFC040', '#E69900', '#B37700', '#FF0000', '#CC0000', '#A60000', '#FE00FF', '#D800D9', '#BC00BF', '#A500A6', '#C7B3FF', '#AA8CFF', '#8E66FF', '#FFFFFF'];
+
+/** ICON global time whose 6-hour sum contains `t` (valid times are every 3 h). */
+export function globalTime(t: Date): Date {
+  return new Date(Math.ceil(t.getTime() / GLOBAL_STEP_MS) * GLOBAL_STEP_MS);
+}
 
 async function capabilitiesEnd(): Promise<number> {
   const res = await fetch(`${CAPABILITIES}&_=${Date.now()}-${Math.random()}`);

@@ -1,7 +1,7 @@
 // Turns a DWD radar or model image (colour-coded intensity) into neon contour bands:
 // four intensity levels, each drawn as a faint fill with a glowing outline.
 
-import { DBZ_COLORS, MODEL_COLORS } from '../api/radar';
+import { DBZ_COLORS, GLOBAL_COLORS, MODEL_COLORS } from '../api/radar';
 
 /** Neon colour per level (1 = leicht … 4 = Hagel möglich). */
 export const LEVEL_COLORS = ['#2de2e6', '#8f7bff', '#ff2fd6', '#f9c80e'];
@@ -28,6 +28,11 @@ function palette(hex: string[], levelStart: number[]): Palette {
 export const RADAR_PALETTE = palette([...DBZ_COLORS, '#000000'], [0, 5, 8, 12]);
 /** Model mm/h, matched to the radar levels: <2, <10, <100, ≥100 mm/h. */
 export const MODEL_PALETTE = palette(MODEL_COLORS, [0, 1, 3, 11]);
+/**
+ * ICON global mm per 6 h: 2–5, 5–30, 30–100, ≥100 mm (on average up to 1, 5, 17, more mm/h).
+ * Below 2 mm the coarse model draws drizzle over half the world, so that stays empty.
+ */
+export const GLOBAL_PALETTE = palette(GLOBAL_COLORS, [3, 4, 9, 17]);
 
 // Resampled images may contain slightly off colours; the coverage outline (#fb00ff) must not match.
 const MAX_DIST2 = 40 * 40;
@@ -84,7 +89,7 @@ const code = (level: number, look: number) => 2 + (level - 1) * 4 + look;
 
 /** RGBA per code. */
 const LUT = new Uint8ClampedArray(256 * 4);
-LUT.set([5, 1, 18, 110], OUTSIDE * 4); // darkens the map a little
+// OUTSIDE stays transparent: shading it showed the radar's coverage shape as a veil over the map.
 NEON.forEach((c, i) => {
   const level = i + 1;
   const fill = 30 + 14 * level;
@@ -134,5 +139,26 @@ export function paintCodes(codes: Uint8Array, img: ImageData): void {
     d[o + 1] = LUT[c + 1];
     d[o + 2] = LUT[c + 2];
     d[o + 3] = LUT[c + 3];
+  }
+}
+
+/**
+ * Marks where a frame has real data (alpha 255), so a coarser layer below can be hidden there.
+ * Model frames cover their whole image. Radar images show "no data" grey inside the product's outline,
+ * and every row starts and ends with that grey, so the outline of a row runs from its first to its last
+ * non-transparent pixel; inside it everything except the grey is covered.
+ */
+export function coverageMask(codes: Uint8Array, w: number, h: number, whole: boolean, out: ImageData): void {
+  const d = out.data;
+  d.fill(0);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    let a = 0;
+    let b = w - 1;
+    if (!whole) {
+      while (a < w && !codes[row + a]) a++;
+      while (b > a && !codes[row + b]) b--;
+    }
+    for (let x = a; x <= b; x++) if (whole || codes[row + x] !== OUTSIDE) d[(row + x) * 4 + 3] = 255;
   }
 }

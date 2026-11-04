@@ -18,7 +18,7 @@ Persönliche Wetter-App fürs iPhone als Progressive Web App. Sie läuft komplet
 | 14-Tage-Ensemble | [Open-Meteo Ensemble API](https://open-meteo.com/en/docs/ensemble-api) | Modelle `ecmwf_ifs025` (51 Läufe), `icon_seamless_eps` |
 | Ortssuche | Open-Meteo Geocoding | `geocoding-api.open-meteo.com/v1/search` |
 | Name des aktuellen Standorts | OpenStreetMap Nominatim | `nominatim.openstreetmap.org/reverse` |
-| Grundkarte | [Natural Earth](https://www.naturalearthdata.com) (gemeinfrei), gebaut mit `npm run basemap` | `src/assets/basemap.json` (im Build enthalten) |
+| Grundkarte | [Natural Earth](https://www.naturalearthdata.com) (gemeinfrei), gebaut mit `npm run basemap` | `src/assets/basemap*.json` (im Build enthalten, Stadtumrisse erst beim Reinzoomen) |
 
 Alle Anfragen gehen direkt vom Gerät an die Dienste. Die Daten des DWD stehen unter CC BY 4.0, die von Open-Meteo ebenfalls.
 

@@ -121,7 +121,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   const map = L.map(el.querySelector<HTMLElement>('#map')!, {
     zoomControl: false,
     attributionControl: true,
-    minZoom: 5,
+    minZoom: 4,
     maxZoom: 11,
     maxBounds: MAP_BOUNDS,
     maxBoundsViscosity: 1,

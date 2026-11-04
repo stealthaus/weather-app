@@ -18,6 +18,9 @@ const MAX_AGE_MS = 45 * 60 * 1000;
 const CHUNK = 200;
 /** Locations per rolling minute; Open-Meteo allows 600, the rest is headroom for the other views. */
 const BUDGET = 450;
+/** Small requests (the coarse preview after zooming out) may use part of that headroom. */
+const SMALL = 40;
+const SMALL_BUDGET = 560;
 const MINUTE_MS = 60 * 1000;
 /** Finest lattice spacing in degrees (ICON-EU has ~0.06°, so finer only adds API calls). */
 const MIN_SPACING = 1 / 16;
@@ -62,7 +65,7 @@ async function budget(n: number, signal: { cancelled: boolean }): Promise<boolea
     const now = Date.now();
     while (spent.length && now - spent[0].t > MINUTE_MS) spent.shift();
     const used = spent.reduce((a, s) => a + s.n, 0);
-    if (!spent.length || used + n <= BUDGET) {
+    if (!spent.length || used + n <= (n <= SMALL ? SMALL_BUDGET : BUDGET)) {
       spent.push({ t: now, n });
       return true;
     }
@@ -87,9 +90,12 @@ export interface FieldGrid {
   v: Float32Array;
 }
 
-/** Lattice spacing for a zoom level: one point about every 80 screen pixels, a power of two in degrees. */
+/**
+ * Lattice spacing for a zoom level, a power of two in degrees: one point about every 80 screen pixels,
+ * zoomed far out every 110 px (whole continents in view, where details matter less than loading fast).
+ */
 export function latticeStep(zoom: number): number {
-  const deg = (80 * 360) / (256 * 2 ** zoom);
+  const deg = ((zoom <= 5 ? 110 : 80) * 360) / (256 * 2 ** zoom);
   return Math.max(MIN_SPACING, 2 ** Math.round(Math.log2(deg)));
 }
 
@@ -112,9 +118,12 @@ function toSeries(p: OmPoint): Series {
 
 /** One request; after "too many requests" it waits and tries again. */
 async function fetchChunk(chunk: [number, number][], signal: { cancelled: boolean }): Promise<void> {
+  // Coarse lattices reach past the poles and the date line (e.g. −192°); Open-Meteo only takes ±90 / ±180.
+  const lat = (v: number) => Math.max(-90, Math.min(90, v));
+  const lon = (v: number) => ((((v + 180) % 360) + 360) % 360) - 180;
   const url =
     'https://api.open-meteo.com/v1/forecast' +
-    `?latitude=${chunk.map((p) => p[0]).join(',')}&longitude=${chunk.map((p) => p[1]).join(',')}` +
+    `?latitude=${chunk.map((p) => lat(p[0])).join(',')}&longitude=${chunk.map((p) => lon(p[1])).join(',')}` +
     '&hourly=cloud_cover,temperature_2m,wind_speed_10m,wind_direction_10m' +
     `&past_hours=${PAST_HOURS}&forecast_hours=${FORECAST_HOURS}&timeformat=unixtime&timezone=GMT`;
   for (let attempt = 0; ; attempt++) {
@@ -125,7 +134,8 @@ async function fetchChunk(chunk: [number, number][], signal: { cancelled: boolea
       arr.forEach((p, j) => points.set(pointKey(...chunk[j]), toSeries(p)));
       return;
     } catch (e) {
-      if (!(e instanceof HttpError && e.status === 429) || attempt >= 3) throw e;
+      // Only the per-minute limit is worth waiting for; the hourly and daily ones are not.
+      if (!(e instanceof HttpError && e.status === 429) || /hourly|daily/i.test(e.message) || attempt >= 3) throw e;
       // Someone else (another tab, another view) used up the minute: count it as full and wait.
       spent.push({ t: Date.now(), n: BUDGET });
       await sleep(15000 * (attempt + 1));
@@ -155,8 +165,9 @@ export async function fieldGrid(
   step: number,
   signal: { cancelled: boolean },
 ): Promise<FieldGrid | null> {
-  const s0 = Math.max(-85, Math.floor(area.south / step) * step);
-  const n0 = Math.min(85, Math.ceil(area.north / step) * step);
+  // Not clamped to the map's ±85°, so every lattice stays aligned with the finer ones.
+  const s0 = Math.floor(area.south / step) * step;
+  const n0 = Math.ceil(area.north / step) * step;
   const w0 = Math.floor(area.west / step) * step;
   const e0 = Math.ceil(area.east / step) * step;
   const nx = Math.round((e0 - w0) / step) + 1;
@@ -224,6 +235,6 @@ export async function fieldGrid(
 /** Number of lattice points an area needs at a spacing (to pick a coarser one on big screens). */
 export function latticeSize(area: { south: number; west: number; north: number; east: number }, step: number): number {
   const nx = Math.ceil(area.east / step) - Math.floor(area.west / step) + 1;
-  const ny = Math.ceil(Math.min(85, area.north) / step) - Math.floor(Math.max(-85, area.south) / step) + 1;
+  const ny = Math.ceil(area.north / step) - Math.floor(area.south / step) + 1;
   return nx * ny;
 }

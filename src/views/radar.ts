@@ -6,6 +6,7 @@ import { addBasemap, BASEMAP_ATTRIBUTION, fitMinZoom, MAP_BOUNDS } from '../lib/
 import { contourCodes, coverageMask, GLOBAL_PALETTE, LEVEL_COLORS, MODEL_PALETTE, paintCodes, RADAR_PALETTE, type Palette } from '../lib/contour';
 import { legendGradient, renderField, sampleField } from '../lib/field';
 import { hhmm } from '../lib/format';
+import { HttpError } from '../lib/http';
 import type { Place } from '../lib/places';
 
 const LEVEL_NAMES = ['LEICHT', 'MÄSSIG', 'STARK', 'HAGEL'];
@@ -556,25 +557,46 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     const area = { south: b.getSouth(), west: b.getWest(), north: b.getNorth(), east: b.getEast() };
     let s = latticeStep(v.zoom);
     while (latticeSize(area, s) > MAX_FIELD_POINTS) s *= 2;
+    const covers = (g: FieldGrid | null, step: number) =>
+      !!g &&
+      g.step <= step &&
+      g.south <= area.south &&
+      g.west <= area.west &&
+      g.south + (g.ny - 1) * g.step >= area.north &&
+      g.west + (g.nx - 1) * g.step >= area.east &&
+      Date.now() - g.t0 < 3 * HOUR_MS;
     // The loaded grid already covers this area at this or a finer spacing.
-    if (grid && grid.step <= s && grid.south <= area.south && grid.west <= area.west && grid.south + (grid.ny - 1) * grid.step >= area.north && grid.west + (grid.nx - 1) * grid.step >= area.east && Date.now() - grid.t0 < 3 * HOUR_MS) {
-      return progress(1, 1);
-    }
+    if (covers(grid, s)) return progress(1, 1);
     if (fieldRequest) fieldRequest.cancelled = true;
     const req = { cancelled: false };
     fieldRequest = req;
     bigLoader = !grid;
-    progress(0, 1);
+    // After zooming out, first a lattice four times coarser (a sixteenth of the points, all of them
+    // part of the fine lattice too, so nothing is asked twice): the whole screen has a field at
+    // once, even if the fine lattice has to wait for Open-Meteo's per-minute limit.
+    // Not worth it when the current grid already fills most of the screen (a small pan).
+    const coarse = s * 4;
+    const filled = (g: FieldGrid | null) => {
+      if (!g) return 0;
+      const w = Math.min(area.east, g.west + (g.nx - 1) * g.step) - Math.max(area.west, g.west);
+      const h = Math.min(area.north, g.south + (g.ny - 1) * g.step) - Math.max(area.south, g.south);
+      return w > 0 && h > 0 ? (w * h) / ((area.east - area.west) * (area.north - area.south)) : 0;
+    };
+    const phases = covers(grid, coarse) || filled(grid) > 0.6 ? [s] : [coarse, s];
     try {
-      const g = await fieldGrid(area, s, req);
-      if (!alive || req.cancelled || !g) return;
-      grid = g;
+      for (let i = 0; i < phases.length; i++) {
+        progress(i, phases.length);
+        const g = await fieldGrid(area, phases[i], req);
+        if (!alive || req.cancelled || !g) return;
+        grid = g;
+        bigLoader = false;
+        paint();
+      }
       progress(1, 1);
-      paint();
-    } catch {
+    } catch (e) {
       if (!alive || req.cancelled) return;
       progress(1, 1);
-      panel.progress.textContent = 'KEIN SIGNAL';
+      panel.progress.textContent = e instanceof HttpError && e.status === 429 ? 'LIMIT – SPÄTER' : 'KEIN SIGNAL';
       panel.progress.classList.add('err');
       panel.progress.hidden = false;
     } finally {
@@ -592,7 +614,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   const scheduleSync = () => {
     clearTimeout(syncTimer);
     // Model fields wait a little longer, so zooming through several levels asks only for the last one.
-    syncTimer = window.setTimeout(sync, kind === 'rain' ? 250 : 600);
+    syncTimer = window.setTimeout(sync, kind === 'rain' ? 250 : 800);
   };
   map.on('moveend resize', scheduleSync);
 

@@ -1,42 +1,54 @@
-// Turns a DWD radar image (16-step dBZ rainbow) into neon contour bands:
+// Turns a DWD radar or model image (colour-coded intensity) into neon contour bands:
 // four intensity levels, each drawn as a faint fill with a glowing outline.
 
-import { DBZ_COLORS } from '../api/radar';
+import { DBZ_COLORS, MODEL_COLORS } from '../api/radar';
 
 /** Neon colour per level (1 = leicht … 4 = Hagel möglich). */
 export const LEVEL_COLORS = ['#2de2e6', '#8f7bff', '#ff2fd6', '#f9c80e'];
-/** Index of the first DBZ_COLORS entry of each level: <23.5, <37, <55, ≥55 dBZ. */
-const LEVEL_START = [0, 5, 8, 12];
 const NO_DATA = 255;
 
 const rgb = (hex: string) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
 const NEON = LEVEL_COLORS.map(rgb);
-const PALETTE = [...DBZ_COLORS, '#000000'].map((hex, i) => ({
-  rgb: rgb(hex),
-  level: LEVEL_START.filter((s) => i >= s).length,
-}));
+
+/** Source colour scale mapped to levels, with a lookup cache per scale. */
+export interface Palette {
+  colors: { rgb: number[]; level: number }[];
+  cache: Map<number, number>;
+}
+
+/** `levelStart`: index of the first colour of each level 1–4. */
+function palette(hex: string[], levelStart: number[]): Palette {
+  return {
+    colors: hex.map((h, i) => ({ rgb: rgb(h), level: levelStart.filter((s) => i >= s).length })),
+    cache: new Map(),
+  };
+}
+
+/** Radar dBZ: <23.5, <37, <55, ≥55 dBZ (≈ <1, <7, <100, ≥100 mm/h). */
+export const RADAR_PALETTE = palette([...DBZ_COLORS, '#000000'], [0, 5, 8, 12]);
+/** Model mm/h, matched to the radar levels: <2, <10, <100, ≥100 mm/h. */
+export const MODEL_PALETTE = palette(MODEL_COLORS, [0, 1, 3, 11]);
 
 // Resampled images may contain slightly off colours; the coverage outline (#fb00ff) must not match.
 const MAX_DIST2 = 40 * 40;
-const cache = new Map<number, number>();
 
-function classify(r: number, g: number, b: number, a: number): number {
+function classify(pal: Palette, r: number, g: number, b: number, a: number): number {
   if (a < 128) return 0;
   // "No data" outside the radar coverage is a half-transparent grey.
   if (a < 250 && Math.abs(r - 125) < 8 && Math.abs(g - 125) < 8 && Math.abs(b - 125) < 8) return NO_DATA;
   const key = (r << 16) | (g << 8) | b;
-  let level = cache.get(key);
+  let level = pal.cache.get(key);
   if (level === undefined) {
     level = 0;
     let best = MAX_DIST2;
-    for (const p of PALETTE) {
+    for (const p of pal.colors) {
       const d = (p.rgb[0] - r) ** 2 + (p.rgb[1] - g) ** 2 + (p.rgb[2] - b) ** 2;
       if (d < best) {
         best = d;
         level = p.level;
       }
     }
-    cache.set(key, level);
+    pal.cache.set(key, level);
   }
   return level;
 }
@@ -79,12 +91,12 @@ NEON.forEach((c, i) => {
   [fill, Math.max(55, fill), 140, 255].forEach((alpha, look) => LUT.set([...c, alpha], code(level, look) * 4));
 });
 
-/** Classifies a DWD radar image into contour codes (one byte per pixel). */
-export function contourCodes(img: ImageData): Uint8Array {
+/** Classifies a DWD image into contour codes (one byte per pixel). */
+export function contourCodes(img: ImageData, pal: Palette): Uint8Array {
   const { width: w, height: h, data } = img;
   const n = w * h;
   const lv = new Uint8Array(n);
-  for (let k = 0; k < n; k++) lv[k] = classify(data[k * 4], data[k * 4 + 1], data[k * 4 + 2], data[k * 4 + 3]);
+  for (let k = 0; k < n; k++) lv[k] = classify(pal, data[k * 4], data[k * 4 + 1], data[k * 4 + 2], data[k * 4 + 3]);
 
   // An edge pixel belongs to a level and touches a lower one. Image borders are not edges.
   const below = (k: number, l: number) => (lv[k] === NO_DATA ? 0 : lv[k]) < l;

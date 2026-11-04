@@ -1,14 +1,17 @@
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { RADAR_DOMAIN, radarFrames, radarImageUrl, type RadarFrame } from '../api/radar';
-import { contourCodes, LEVEL_COLORS, paintCodes } from '../lib/contour';
+import { contourCodes, LEVEL_COLORS, MODEL_PALETTE, paintCodes, RADAR_PALETTE } from '../lib/contour';
 import { hhmm } from '../lib/format';
 import type { Place } from '../lib/places';
 
 const LEVEL_NAMES = ['LEICHT', 'MÄSSIG', 'STARK', 'HAGEL'];
 const PAST_MIN = 60;
-const STEPS = [5, 15, 30] as const;
+const STEPS = [5, 15, 30, 60] as const;
 type Step = (typeof STEPS)[number];
+/** How far ahead each step reaches. Beyond the 2 h nowcast, hourly model frames take over. */
+const HORIZON_MIN: Record<Step, number> = { 5: 120, 15: 120, 30: 6 * 60, 60: 12 * 60 };
+const stepLabel = (s: Step) => (s < 60 ? `${s}M` : `${s / 60}H`);
 /** Same speed for every step; finer steps just take longer to play through. */
 const FRAME_MS = 500;
 const PREF_STEP = 'wx.radar.step';
@@ -99,7 +102,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
       <div class="osd osd-clock"><span class="radar-time">–:–</span><small>${day}</small></div>
       <div class="osd radar-progress" hidden></div>
       <div class="radar-steps" role="group" aria-label="Zeitschritt">
-        ${STEPS.map((s) => `<button type="button" data-step="${s}" aria-pressed="${s === step}" aria-label="${s} Minuten">${s}M</button>`).join('')}
+        ${STEPS.map((s) => `<button type="button" data-step="${s}" aria-pressed="${s === step}" aria-label="${s < 60 ? `${s} Minuten` : `${s / 60} Stunde`}">${stepLabel(s)}</button>`).join('')}
       </div>
       <div class="radar-panel">
         <div class="radar-row">
@@ -159,8 +162,9 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   };
 
   let frames: RadarFrame[] = [];
-  /** Loaded frames by time (ms), so switching the step reuses what is already there. */
-  const cache = new Map<number, FrameData>();
+  /** Loaded frames by layer and time, so switching the step reuses what is already there. */
+  const cache = new Map<string, FrameData>();
+  const key = (f: RadarFrame) => `${f.layer}|${f.time.getTime()}`;
   let nowIdx = 0;
   let index = 0;
   let timer = 0;
@@ -174,7 +178,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   // ---- drawing --------------------------------------------------------------
 
   const paint = () => {
-    const d = frames[index] && cache.get(frames[index].time.getTime());
+    const d = frames[index] && cache.get(key(frames[index]));
     if (!d) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       return;
@@ -195,10 +199,11 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     const f = frames[i];
     const diff = Math.round((f.time.getTime() - frames[nowIdx].time.getTime()) / 60000);
     panel.range.value = String(i);
-    panel.range.setAttribute('aria-valuetext', `${hhmm(f.time)}, ${f.forecast ? `Vorhersage +${diff} min` : diff === 0 ? 'letzte Messung' : `Messung ${diff} min`}`);
+    const kind = f.model ? 'Modellvorhersage' : f.forecast ? 'Vorhersage' : diff === 0 ? 'letzte Messung' : 'Messung';
+    panel.range.setAttribute('aria-valuetext', `${hhmm(f.time)}, ${kind}${diff ? ` ${counter(diff).trim()} h` : ''}`);
     panel.time.textContent = hhmm(f.time);
     panel.counter.textContent = counter(diff);
-    panel.mode.textContent = f.forecast ? '▶▶ PROGNOSE' : diff === 0 ? '● LIVE' : '◀ ARCHIV';
+    panel.mode.textContent = f.model ? '▶▶ MODELL' : f.forecast ? '▶▶ PROGNOSE' : diff === 0 ? '● LIVE' : '◀ ARCHIV';
     panel.mode.classList.toggle('fc', f.forecast);
     [...panel.bars.children].forEach((b, j) => b.classList.toggle('played', j <= i));
   };
@@ -251,7 +256,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   const fetchFrame = async (f: RadarFrame, v: View, gen: number) => {
     const sw = L.CRS.EPSG3857.project(v.bounds.getSouthWest());
     const ne = L.CRS.EPSG3857.project(v.bounds.getNorthEast());
-    const url = radarImageUrl(f.time, [sw.x, sw.y, ne.x, ne.y], v.w, v.h);
+    const url = radarImageUrl(f.layer, f.time, [sw.x, sw.y, ne.x, ne.y], v.w, v.h);
     // Some DWD backend nodes lag behind and answer with an XML error; retry a few times.
     for (let attempt = 0; attempt < 4; attempt++) {
       if (gen !== generation) return;
@@ -265,7 +270,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
           sctx.clearRect(0, 0, v.w, v.h);
         }
         sctx.drawImage(img, 0, 0);
-        cache.set(f.time.getTime(), { view: v, codes: contourCodes(sctx.getImageData(0, 0, v.w, v.h)) });
+        cache.set(key(f), { view: v, codes: contourCodes(sctx.getImageData(0, 0, v.w, v.h), f.model ? MODEL_PALETTE : RADAR_PALETTE) });
         return;
       } catch {
         await sleep(400 * (attempt + 1));
@@ -279,7 +284,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     const v = neededView();
     if (!v) return progress(1, 1);
     view = v;
-    const todo = frames.filter((f) => cache.get(f.time.getTime())?.view !== v);
+    const todo = frames.filter((f) => cache.get(key(f))?.view !== v);
     if (!todo.length) return progress(1, 1);
 
     const gen = ++generation;
@@ -288,7 +293,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     // The visible frame first, then in time order.
     const current = frames[index];
     todo.sort((a, b) => (a === current ? -1 : b === current ? 1 : a.time.getTime() - b.time.getTime()));
-    bigLoader = !cache.has(current.time.getTime());
+    bigLoader = !cache.has(key(current));
     const total = todo.length;
     let done = 0;
     progress(0, total);
@@ -346,13 +351,13 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     const wasPlaying = !!timer;
     stop();
     const prevTime = frames[index]?.time.getTime();
-    const next = await radarFrames(PAST_MIN, step);
+    const next = await radarFrames(PAST_MIN, step, HORIZON_MIN[step]);
     if (!alive || req !== framesRequest) return;
     frames = next;
-    const times = new Set(frames.map((f) => f.time.getTime()));
-    for (const t of cache.keys()) if (!times.has(t)) cache.delete(t);
+    const keys = new Set(frames.map(key));
+    for (const k of cache.keys()) if (!keys.has(k)) cache.delete(k);
     nowIdx = frames.some((f) => f.forecast) ? Math.max(0, frames.findIndex((f) => f.forecast) - 1) : frames.length - 1;
-    panel.bars.innerHTML = frames.map((f, i) => `<i class="${f.forecast ? 'fc' : ''}${i === nowIdx ? ' now' : ''}"></i>`).join('');
+    panel.bars.innerHTML = frames.map((f, i) => `<i class="${f.model ? 'fc md' : f.forecast ? 'fc' : ''}${i === nowIdx ? ' now' : ''}"></i>`).join('');
     panel.bars.classList.toggle('dense', frames.length > 20);
     panel.range.max = String(frames.length - 1);
     // Stay at the same time when switching the step, if that time still exists.

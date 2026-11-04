@@ -23,6 +23,8 @@ export interface RadarFrame {
   model: boolean;
   /** Radar or ICON-EU layer; null after the end of the ICON-EU run, where only ICON global is shown. */
   layer: string | null;
+  /** Analysis time of a nowcast frame (it changes with every new measurement); 0 for all others. */
+  issued: number;
 }
 
 /** dBZ colour scale of the DWD layer (from GetLegendGraphic), mapped to neon contour levels in lib/contour. */
@@ -107,13 +109,13 @@ export async function radarFrames(pastMin: number, stepMin: number, horizon: (an
   const frames: RadarFrame[] = [];
   // Anchor on the analysis time so "now" is always one of the frames.
   for (let t = analysis.getTime() - pastMin * 60 * 1000; t <= end.getTime(); t += step) {
-    frames.push({ time: new Date(t), forecast: t > analysis.getTime(), model: false, layer: RADAR_LAYER });
+    frames.push({ time: new Date(t), forecast: t > analysis.getTime(), model: false, layer: RADAR_LAYER, issued: t > analysis.getTime() ? analysis.getTime() : 0 });
   }
   const last = horizon(analysis);
   if (last <= end.getTime()) return frames;
   const lastModel = await modelEndP;
   for (let t = Math.floor(end.getTime() / HOUR_MS) * HOUR_MS + HOUR_MS; t <= last; t += HOUR_MS) {
-    frames.push({ time: new Date(t), forecast: true, model: true, layer: t <= lastModel ? MODEL_LAYER : null });
+    frames.push({ time: new Date(t), forecast: true, model: true, layer: t <= lastModel ? MODEL_LAYER : null, issued: 0 });
   }
   return frames;
 }

@@ -54,8 +54,12 @@ const PARALLEL = 4;
 const PAD = 0.2;
 /** Caps image size on large screens (server time and memory grow with the pixel count). */
 const MAX_PIXELS = 1_000_000;
+/** ICON-EU has a ~7 km grid: fewer pixels look the same and the DWD answers about twice as fast. */
+const MODEL_MAX_PIXELS = 300_000;
 /** The ICON global grid is ~28 km, so its images can be coarser. */
 const GLOBAL_MAX_PIXELS = 400_000;
+/** Model images change with every new run (ICON-EU every 3 h), so kept ones are loaded again after this. */
+const MODEL_MAX_AGE_MS = HOUR_MS;
 /** Model fields are smooth: about half the CSS resolution on a phone, so a frame paints in a few ms. */
 const FIELD_MAX_PIXELS = 150_000;
 /** Open-Meteo counts every lattice point as one API call (600 per minute). */
@@ -81,6 +85,8 @@ interface View {
 interface FrameData {
   view: View;
   codes: Uint8Array;
+  /** After this the frame is loaded again (model runs); Infinity for measurements and nowcasts. */
+  expires: number;
 }
 
 /** One image to download. */
@@ -90,6 +96,7 @@ interface Job {
   time: Date;
   view: View;
   palette: Palette;
+  expires: number;
 }
 
 /** A canvas on the map that shows one loaded frame. */
@@ -155,6 +162,15 @@ function loadImage(url: string, inflight: Set<HTMLImageElement>): Promise<HTMLIm
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Loaded frames by layer and time, kept across mounts of the view: switching tabs and back costs
+ * no new downloads (the DWD needs 0.5–2 s per image). Nowcast keys contain their analysis time,
+ * so a newer measurement replaces them; model frames expire.
+ */
+const cache = new Map<string, FrameData>();
+/** Areas the cached frames were loaded for (radar, ICON-EU, ICON global); kept with the cache. */
+const views: { radar: View | null; model: View | null; world: View | null } = { radar: null, model: null, world: null };
 
 export function mountRadar(el: HTMLElement, place: Place): () => void {
   let step = saved<Step>(PREF_STEP, STEPS, Number as (v: string) => Step, 15);
@@ -265,16 +281,12 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   };
 
   let frames: RadarFrame[] = [];
-  /** Loaded frames by layer and time, so switching the step reuses what is already there. */
-  const cache = new Map<string, FrameData>();
-  const key = (f: RadarFrame) => `${f.layer}|${f.time.getTime()}`;
+  const key = (f: RadarFrame) => `${f.layer}|${f.time.getTime()}|${f.issued}`;
   const worldKey = (f: RadarFrame) => `${GLOBAL_LAYER}|${globalTime(f.time).getTime()}`;
   let nowIdx = 0;
   let index = 0;
   let timer = 0;
   let alive = true;
-  let view: View | null = null;
-  let worldView: View | null = null;
   /** Incremented on every reload; older downloads see the mismatch and stop. */
   let generation = 0;
   const inflight = new Set<HTMLImageElement>();
@@ -477,7 +489,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
           sctx.clearRect(0, 0, v.w, v.h);
         }
         sctx.drawImage(img, 0, 0);
-        cache.set(job.key, { view: v, codes: contourCodes(sctx.getImageData(0, 0, v.w, v.h), job.palette) });
+        cache.set(job.key, { view: v, codes: contourCodes(sctx.getImageData(0, 0, v.w, v.h), job.palette), expires: job.expires });
         return;
       } catch {
         await sleep(400 * (attempt + 1));
@@ -494,14 +506,20 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
 
   /** Loads every radar/ICON-EU frame and every ICON global image that has no data for the current view yet. */
   const syncRain = () => {
-    const v = neededView(DOMAIN, view, MAX_PIXELS);
-    const wv = neededView(WORLD, worldView, GLOBAL_MAX_PIXELS);
-    if (v) view = v;
-    if (wv) worldView = wv;
+    const v = neededView(DOMAIN, views.radar, MAX_PIXELS);
+    const mv = neededView(DOMAIN, views.model, MODEL_MAX_PIXELS);
+    const wv = neededView(WORLD, views.world, GLOBAL_MAX_PIXELS);
+    if (v) views.radar = v;
+    if (mv) views.model = mv;
+    if (wv) views.world = wv;
+    const modelExpires = Date.now() + MODEL_MAX_AGE_MS;
     const jobs: Job[] = [];
-    if (v) {
+    if (v && mv) {
       for (const f of frames) {
-        if (f.layer && cache.get(key(f))?.view !== v) jobs.push({ key: key(f), layer: f.layer, time: f.time, view: v, palette: f.model ? MODEL_PALETTE : RADAR_PALETTE });
+        const fv = f.model ? mv : v;
+        if (f.layer && cache.get(key(f))?.view !== fv) {
+          jobs.push({ key: key(f), layer: f.layer, time: f.time, view: fv, palette: f.model ? MODEL_PALETTE : RADAR_PALETTE, expires: f.model ? modelExpires : Infinity });
+        }
       }
     }
     if (wv) {
@@ -510,7 +528,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
         const k = worldKey(f);
         if (seen.has(k)) continue;
         seen.add(k);
-        if (cache.get(k)?.view !== wv) jobs.push({ key: k, layer: GLOBAL_LAYER, time: globalTime(f.time), view: wv, palette: GLOBAL_PALETTE });
+        if (cache.get(k)?.view !== wv) jobs.push({ key: k, layer: GLOBAL_LAYER, time: globalTime(f.time), view: wv, palette: GLOBAL_PALETTE, expires: modelExpires });
       }
     }
     if (!jobs.length) return progress(1, 1);
@@ -733,7 +751,8 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     if (!alive || req !== framesRequest) return;
     frames = next;
     const keys = new Set([...frames.map(key), ...frames.map(worldKey)]);
-    for (const k of cache.keys()) if (!keys.has(k)) cache.delete(k);
+    const t = Date.now();
+    for (const [k, d] of cache) if (!keys.has(k) || d.expires < t) cache.delete(k);
     nowIdx = frames.some((f) => f.forecast) ? Math.max(0, frames.findIndex((f) => f.forecast) - 1) : frames.length - 1;
     panel.bars.innerHTML = frames.map((f, i) => `<i class="${f.model ? 'fc md' : f.forecast ? 'fc' : ''}${i === nowIdx ? ' now' : ''}"></i>`).join('');
     panel.bars.classList.toggle('dense', frames.length > 20);
@@ -822,6 +841,5 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     stop();
     ro.disconnect();
     map.remove();
-    cache.clear();
   };
 }

@@ -57,8 +57,8 @@ const MAX_PIXELS = 1_000_000;
 const GLOBAL_MAX_PIXELS = 400_000;
 /** Model fields are smooth: about half the CSS resolution on a phone, so a frame paints in a few ms. */
 const FIELD_MAX_PIXELS = 150_000;
-/** Open-Meteo counts every lattice point as one API call. */
-const MAX_FIELD_POINTS = 400;
+/** Open-Meteo counts every lattice point as one API call (600 per minute). */
+const MAX_FIELD_POINTS = 250;
 /** Distance of the value labels on the map in screen pixels. */
 const LABEL_DX = 84;
 const LABEL_DY = 76;
@@ -591,7 +591,8 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   let syncTimer = 0;
   const scheduleSync = () => {
     clearTimeout(syncTimer);
-    syncTimer = window.setTimeout(sync, 250);
+    // Model fields wait a little longer, so zooming through several levels asks only for the last one.
+    syncTimer = window.setTimeout(sync, kind === 'rain' ? 250 : 600);
   };
   map.on('moveend resize', scheduleSync);
 

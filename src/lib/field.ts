@@ -1,5 +1,5 @@
 // Paints an hourly model field (clouds, temperature, wind) into a canvas image:
-// bilinear between lattice points, linear between hours, with glowing isolines
+// bicubic between the (coarse) lattice points, linear between hours, with glowing isolines
 // in the same neon look as the rain contours.
 
 import type { FieldGrid, FieldKind } from '../api/fields';
@@ -79,17 +79,49 @@ function slice(g: FieldGrid, arr: Float32Array, t: number): Float32Array {
   return out;
 }
 
-/** Bilinear value at a fractional lattice position; NaN outside the grid or next to a missing point. */
-function bilinear(s: Float32Array, nx: number, ny: number, fx: number, fy: number): number {
+const cubic = (p0: number, p1: number, p2: number, p3: number, t: number) =>
+  p1 + 0.5 * t * (p2 - p0 + t * (2 * p0 - 5 * p1 + 4 * p2 - p3 + t * (3 * (p1 - p2) + p3 - p0)));
+
+/** Catmull-Rom value at a fractional lattice position (smooth, unlike bilinear); NaN outside the grid. */
+function bicubic(s: Float32Array, nx: number, ny: number, fx: number, fy: number): number {
   if (fx < 0 || fy < 0 || fx > nx - 1 || fy > ny - 1) return NaN;
-  const x0 = Math.min(nx - 2, Math.floor(fx));
-  const y0 = Math.min(ny - 2, Math.floor(fy));
-  const ax = fx - x0;
-  const ay = fy - y0;
-  const k = y0 * nx + x0;
-  const top = s[k] * (1 - ax) + s[k + 1] * ax;
-  const bottom = s[k + nx] * (1 - ax) + s[k + nx + 1] * ax;
-  return top * (1 - ay) + bottom * ay;
+  const i = Math.min(nx - 2, Math.floor(fx));
+  const j = Math.min(ny - 2, Math.floor(fy));
+  const tx = fx - i;
+  const ty = fy - j;
+  const xs = [Math.max(0, i - 1), i, i + 1, Math.min(nx - 1, i + 2)];
+  const row = (y: number) => {
+    const o = Math.max(0, Math.min(ny - 1, y)) * nx;
+    return cubic(s[o + xs[0]], s[o + xs[1]], s[o + xs[2]], s[o + xs[3]], tx);
+  };
+  return cubic(row(j - 1), row(j), row(j + 1), row(j + 2), ty);
+}
+
+/** Lattice refined by REFINE with bicubic values, so every pixel needs only a bilinear lookup. */
+const REFINE = 4;
+function refine(s: Float32Array, nx: number, ny: number): { data: Float32Array; nx: number; ny: number } {
+  const nx2 = (nx - 1) * REFINE + 1;
+  const ny2 = (ny - 1) * REFINE + 1;
+  // Separable: first along the rows, then along the columns.
+  const tmp = new Float32Array(nx2 * ny);
+  for (let y = 0; y < ny; y++) {
+    const o = y * nx;
+    for (let x2 = 0; x2 < nx2; x2++) {
+      const i = Math.min(nx - 2, Math.floor(x2 / REFINE));
+      tmp[y * nx2 + x2] = cubic(s[o + Math.max(0, i - 1)], s[o + i], s[o + i + 1], s[o + Math.min(nx - 1, i + 2)], x2 / REFINE - i);
+    }
+  }
+  const data = new Float32Array(nx2 * ny2);
+  for (let y2 = 0; y2 < ny2; y2++) {
+    const j = Math.min(ny - 2, Math.floor(y2 / REFINE));
+    const t = y2 / REFINE - j;
+    const r0 = Math.max(0, j - 1) * nx2;
+    const r1 = j * nx2;
+    const r2 = (j + 1) * nx2;
+    const r3 = Math.min(ny - 1, j + 2) * nx2;
+    for (let x2 = 0; x2 < nx2; x2++) data[y2 * nx2 + x2] = cubic(tmp[r0 + x2], tmp[r1 + x2], tmp[r2 + x2], tmp[r3 + x2], t);
+  }
+  return { data, nx: nx2, ny: ny2 };
 }
 
 /** Value at a place and time, plus the direction the wind blows to (degrees from north) for wind. */
@@ -99,8 +131,8 @@ export function sampleField(g: FieldGrid, kind: FieldKind, lat: number, lon: num
   const at = (arr: Float32Array) => {
     const [h0, h1, a] = hourPos(g, t);
     const n = g.nx * g.ny;
-    const v0 = bilinear(arr.subarray(h0 * n, h0 * n + n), g.nx, g.ny, fx, fy);
-    const v1 = bilinear(arr.subarray(h1 * n, h1 * n + n), g.nx, g.ny, fx, fy);
+    const v0 = bicubic(arr.subarray(h0 * n, h0 * n + n), g.nx, g.ny, fx, fy);
+    const v1 = bicubic(arr.subarray(h1 * n, h1 * n + n), g.nx, g.ny, fx, fy);
     return v0 * (1 - a) + v1 * a;
   };
   if (kind === 'clouds') return { value: at(g.clouds) };
@@ -116,14 +148,39 @@ export function sampleField(g: FieldGrid, kind: FieldKind, lat: number, lon: num
  */
 export function renderField(g: FieldGrid, kind: FieldKind, t: number, rowLat: Float64Array, colLon: Float64Array, out: ImageData): void {
   const { width: w, height: h, data } = out;
-  const s = slice(g, kind === 'clouds' ? g.clouds : kind === 'temp' ? g.temp : g.speed, t);
+  const fine = refine(slice(g, kind === 'clouds' ? g.clouds : kind === 'temp' ? g.temp : g.speed, t), g.nx, g.ny);
   const n = w * h;
   const val = new Float32Array(n);
-  const fxs = Float64Array.from(colLon, (lon) => (lon - g.west) / g.step);
+  // Bilinear lookup in the refined lattice, inlined: this loop runs for every pixel of every frame.
+  const { data: fd, nx: fnx, ny: fny } = fine;
+  const cx = new Int32Array(w).fill(-1);
+  const cax = new Float32Array(w);
+  for (let x = 0; x < w; x++) {
+    const fx = ((colLon[x] - g.west) / g.step) * REFINE;
+    if (fx < 0 || fx > fnx - 1) continue;
+    cx[x] = Math.min(fnx - 2, Math.floor(fx));
+    cax[x] = fx - cx[x];
+  }
   for (let y = 0; y < h; y++) {
-    const fy = (rowLat[y] - g.south) / g.step;
     const row = y * w;
-    for (let x = 0; x < w; x++) val[row + x] = bilinear(s, g.nx, g.ny, fxs[x], fy);
+    const fy = ((rowLat[y] - g.south) / g.step) * REFINE;
+    if (fy < 0 || fy > fny - 1) {
+      val.fill(NaN, row, row + w);
+      continue;
+    }
+    const y0 = Math.min(fny - 2, Math.floor(fy));
+    const ay = fy - y0;
+    const o = y0 * fnx;
+    for (let x = 0; x < w; x++) {
+      const x0 = cx[x];
+      if (x0 < 0) {
+        val[row + x] = NaN;
+        continue;
+      }
+      const ax = cax[x];
+      const k = o + x0;
+      val[row + x] = (fd[k] * (1 - ax) + fd[k + 1] * ax) * (1 - ay) + (fd[k + fnx] * (1 - ax) + fd[k + fnx + 1] * ax) * ay;
+    }
   }
 
   // Band per pixel for the isolines; -1 = no data.
@@ -148,8 +205,8 @@ export function renderField(g: FieldGrid, kind: FieldKind, t: number, rowLat: Fl
         const k = y * w + x;
         const b = band[k];
         if (b < 0) continue;
-        const lower = (j: number) => band[j] >= 0 && band[j] < b;
-        if ((x > 0 && lower(k - 1)) || (x < w - 1 && lower(k + 1)) || (y > 0 && lower(k - w)) || (y < h - 1 && lower(k + w))) line[k] = 2;
+        // Neighbours without data are -1, so "below b but not negative" marks a lower band.
+        if ((x > 0 && band[k - 1] >= 0 && band[k - 1] < b) || (x < w - 1 && band[k + 1] >= 0 && band[k + 1] < b) || (y > 0 && band[k - w] >= 0 && band[k - w] < b) || (y < h - 1 && band[k + w] >= 0 && band[k + w] < b)) line[k] = 2;
       }
     }
     for (let y = 0; y < h; y++) {
@@ -172,7 +229,9 @@ export function renderField(g: FieldGrid, kind: FieldKind, t: number, rowLat: Fl
     let b: number;
     let a: number;
     if (kind === 'clouds') {
-      [r, gr, b] = CLOUD_RGB;
+      r = CLOUD_RGB[0];
+      gr = CLOUD_RGB[1];
+      b = CLOUD_RGB[2];
       a = 200 * Math.pow(Math.min(100, Math.max(0, v)) / 100, 1.6);
     } else {
       const l = kind === 'temp' ? TEMP_LUT : WIND_LUT;

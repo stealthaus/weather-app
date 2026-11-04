@@ -1,9 +1,10 @@
 // Hourly model fields (clouds, temperature, wind) for the radar map, from Open-Meteo.
 // Open-Meteo has no gridded endpoint, so the map asks for the points of a regular lattice
-// in one multi-location request. Every location counts as one API call, so points are
-// cached and the lattices of neighbouring zoom levels share their points.
+// in one multi-location request. Every location counts as one API call (limit: 600 per
+// minute), so the lattice is coarse (lib/field smooths it), points are cached, the lattices
+// of neighbouring zoom levels share their points, and requests keep to a budget per minute.
 
-import { getJson } from '../lib/http';
+import { getJson, HttpError } from '../lib/http';
 
 export type FieldKind = 'clouds' | 'temp' | 'wind';
 
@@ -15,6 +16,9 @@ const FORECAST_HOURS = 100;
 const MAX_AGE_MS = 45 * 60 * 1000;
 /** Locations per request; keeps the URL short. */
 const CHUNK = 200;
+/** Locations per rolling minute; Open-Meteo allows 600, the rest is headroom for the other views. */
+const BUDGET = 450;
+const MINUTE_MS = 60 * 1000;
 /** Finest lattice spacing in degrees (ICON-EU has ~0.06°, so finer only adds API calls). */
 const MIN_SPACING = 1 / 16;
 
@@ -44,6 +48,27 @@ interface OmPoint {
 /** Lives across mounts of the radar view, so switching tabs costs no new API calls. */
 const points = new Map<string, Series>();
 const pointKey = (lat: number, lon: number) => `${lat.toFixed(4)},${lon.toFixed(4)}`;
+/** Points of requests still running, so a newer view waits for them instead of asking again. */
+const pending = new Map<string, Promise<unknown>>();
+/** Locations requested in the last minute. */
+const spent: { t: number; n: number }[] = [];
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Waits until `n` more locations fit into the budget of the last minute; false if cancelled meanwhile. */
+async function budget(n: number, signal: { cancelled: boolean }): Promise<boolean> {
+  for (;;) {
+    if (signal.cancelled) return false;
+    const now = Date.now();
+    while (spent.length && now - spent[0].t > MINUTE_MS) spent.shift();
+    const used = spent.reduce((a, s) => a + s.n, 0);
+    if (!spent.length || used + n <= BUDGET) {
+      spent.push({ t: now, n });
+      return true;
+    }
+    await sleep(Math.min(5000, spent[0].t + MINUTE_MS - now + 200));
+  }
+}
 
 /** Hourly values on a regular lat/lon lattice, indexed [hour][row][col], rows from south to north. */
 export interface FieldGrid {
@@ -62,9 +87,9 @@ export interface FieldGrid {
   v: Float32Array;
 }
 
-/** Lattice spacing for a zoom level: one point about every 45 screen pixels, a power of two in degrees. */
+/** Lattice spacing for a zoom level: one point about every 80 screen pixels, a power of two in degrees. */
 export function latticeStep(zoom: number): number {
-  const deg = (45 * 360) / (256 * 2 ** zoom);
+  const deg = (80 * 360) / (256 * 2 ** zoom);
   return Math.max(MIN_SPACING, 2 ** Math.round(Math.log2(deg)));
 }
 
@@ -85,17 +110,39 @@ function toSeries(p: OmPoint): Series {
   return { t0: h.time[0] * 1000, clouds: f(h.cloud_cover), temp: f(h.temperature_2m), speed, u, v, loaded: Date.now() };
 }
 
+/** One request; after "too many requests" it waits and tries again. */
+async function fetchChunk(chunk: [number, number][], signal: { cancelled: boolean }): Promise<void> {
+  const url =
+    'https://api.open-meteo.com/v1/forecast' +
+    `?latitude=${chunk.map((p) => p[0]).join(',')}&longitude=${chunk.map((p) => p[1]).join(',')}` +
+    '&hourly=cloud_cover,temperature_2m,wind_speed_10m,wind_direction_10m' +
+    `&past_hours=${PAST_HOURS}&forecast_hours=${FORECAST_HOURS}&timeformat=unixtime&timezone=GMT`;
+  for (let attempt = 0; ; attempt++) {
+    if (!(await budget(chunk.length, signal))) return;
+    try {
+      const res = await getJson<OmPoint | OmPoint[]>(url, 30000);
+      const arr = Array.isArray(res) ? res : [res];
+      arr.forEach((p, j) => points.set(pointKey(...chunk[j]), toSeries(p)));
+      return;
+    } catch (e) {
+      if (!(e instanceof HttpError && e.status === 429) || attempt >= 3) throw e;
+      // Someone else (another tab, another view) used up the minute: count it as full and wait.
+      spent.push({ t: Date.now(), n: BUDGET });
+      await sleep(15000 * (attempt + 1));
+    }
+  }
+}
+
 async function fetchPoints(list: [number, number][], signal: { cancelled: boolean }): Promise<void> {
   for (let i = 0; i < list.length && !signal.cancelled; i += CHUNK) {
     const chunk = list.slice(i, i + CHUNK);
-    const url =
-      'https://api.open-meteo.com/v1/forecast' +
-      `?latitude=${chunk.map((p) => p[0]).join(',')}&longitude=${chunk.map((p) => p[1]).join(',')}` +
-      '&hourly=cloud_cover,temperature_2m,wind_speed_10m,wind_direction_10m' +
-      `&past_hours=${PAST_HOURS}&forecast_hours=${FORECAST_HOURS}&timeformat=unixtime&timezone=GMT`;
-    const res = await getJson<OmPoint | OmPoint[]>(url, 30000);
-    const arr = Array.isArray(res) ? res : [res];
-    arr.forEach((p, j) => points.set(pointKey(...chunk[j]), toSeries(p)));
+    const req = fetchChunk(chunk, signal);
+    for (const p of chunk) pending.set(pointKey(...p), req);
+    try {
+      await req;
+    } finally {
+      for (const p of chunk) if (pending.get(pointKey(...p)) === req) pending.delete(pointKey(...p));
+    }
   }
 }
 
@@ -115,17 +162,25 @@ export async function fieldGrid(
   const nx = Math.round((e0 - w0) / step) + 1;
   const ny = Math.round((n0 - s0) / step) + 1;
   const now = Date.now();
-  const missing: [number, number][] = [];
-  for (let y = 0; y < ny; y++) {
-    for (let x = 0; x < nx; x++) {
-      const lat = s0 + y * step;
-      const lon = w0 + x * step;
-      const p = points.get(pointKey(lat, lon));
-      if (!p || now - p.loaded > MAX_AGE_MS) missing.push([lat, lon]);
+  // Second round: points a cancelled older request left out while this one waited for it.
+  for (let round = 0; round < 2; round++) {
+    const missing: [number, number][] = [];
+    const running = new Set<Promise<unknown>>();
+    for (let y = 0; y < ny; y++) {
+      for (let x = 0; x < nx; x++) {
+        const lat = s0 + y * step;
+        const lon = w0 + x * step;
+        const k = pointKey(lat, lon);
+        const p = points.get(k);
+        const r = pending.get(k);
+        if (r) running.add(r);
+        else if (!p || now - p.loaded > MAX_AGE_MS) missing.push([lat, lon]);
+      }
     }
+    if (!missing.length && !running.size) break;
+    await Promise.all([fetchPoints(missing, signal), Promise.allSettled(running)]);
+    if (signal.cancelled) return null;
   }
-  if (missing.length) await fetchPoints(missing, signal);
-  if (signal.cancelled) return null;
 
   // Align every point on the newest common start hour.
   const t0 = Math.floor(now / HOUR_MS) * HOUR_MS - PAST_HOURS * HOUR_MS;

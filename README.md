@@ -5,7 +5,7 @@ Persönliche Wetter-App fürs iPhone als Progressive Web App. Sie läuft komplet
 **Ansichten**
 
 - **Jetzt:** aktuelle Messung der nächsten DWD-Station, 48-Stunden-Verlauf und 10-Tage-Übersicht (DWD MOSMIX über Bright Sky)
-- **Radar:** DWD-Radarkomposit der letzten Stunde plus 2 Stunden Nowcast als Animation
+- **Radar:** DWD-Radarkomposit der letzten Stunde plus 2 Stunden Nowcast als Animation, Takt 5, 15, 30 oder 60 Minuten. Mit 30 Minuten geht es bis +6 h, mit 60 Minuten bis +12 h; nach dem Nowcast übernimmt das stündliche ICON-EU-Modell.
 - **14 Tage:** Ensemble-Trend (ECMWF IFS, optional zusätzlich ICON-EPS) mit Median und 10–90-%-Band für Höchst- und Tiefstwert, Regenwahrscheinlichkeit und Niederschlagsspanne. Ab Tag 10 zeigt die App nur noch Spannen.
 
 ## Datenquellen
@@ -14,6 +14,7 @@ Persönliche Wetter-App fürs iPhone als Progressive Web App. Sie läuft komplet
 | --- | --- | --- |
 | Aktuelles Wetter, Vorhersage | [Bright Sky](https://brightsky.dev) (DWD MOSMIX und SYNOP) | `api.brightsky.dev/current_weather`, `/weather` |
 | Regenradar | [DWD GeoServer](https://maps.dwd.de) (WMS) | Layer `dwd:Radar_wn-product_1x1km_ger` |
+| Regenvorhersage nach +2 h | DWD GeoServer (WMS), ICON-EU | Layer `dwd:Icon-eu_reg00625_fd_sl_TOTPREC01H` |
 | 14-Tage-Ensemble | [Open-Meteo Ensemble API](https://open-meteo.com/en/docs/ensemble-api) | Modelle `ecmwf_ifs025` (51 Läufe), `icon_seamless_eps` |
 | Ortssuche | Open-Meteo Geocoding | `geocoding-api.open-meteo.com/v1/search` |
 | Name des aktuellen Standorts | OpenStreetMap Nominatim | `nominatim.openstreetmap.org/reverse` |

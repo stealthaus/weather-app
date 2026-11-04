@@ -384,10 +384,35 @@ section.block {
   --vhs: 'VT323', ui-monospace, monospace;
   --rgb-split: 2px 0 0 rgba(255, 47, 214, 0.8), -2px 0 0 rgba(45, 226, 230, 0.8);
 }
-#map { position: absolute; inset: 0; background: var(--bg); }
-/* OSM tiles turned into a near-black map with violet line work. */
-.basemap { filter: grayscale(1) invert(1) contrast(2.4) brightness(0.42) sepia(1) hue-rotate(250deg) saturate(4); }
-.grid-tile { border-right: 1px solid rgba(255, 47, 214, 0.2); border-bottom: 1px solid rgba(255, 47, 214, 0.2); }
+/* The map background is the sea; land is drawn on top (lib/basemap). */
+#map { position: absolute; inset: 0; background: #020b26; }
+.grid-tile { border-right: 1px solid rgba(255, 47, 214, 0.1); border-bottom: 1px solid rgba(255, 47, 214, 0.1); }
+.place-labels.hidden { display: none; }
+.map-place {
+  position: absolute;
+  left: 0;
+  top: 0;
+  margin-top: -0.6em;
+  padding-left: 9px;
+  font: 600 11px/1.2 var(--font);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: rgba(214, 200, 255, 0.62);
+  text-shadow: 0 0 2px #020b26, 0 0 4px #020b26, 0 0 6px #020b26;
+}
+.map-place::before {
+  content: '';
+  position: absolute;
+  left: -2px;
+  top: 50%;
+  width: 4px;
+  height: 4px;
+  margin-top: -2px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.map-place.major { font-size: 13px; color: rgba(236, 226, 255, 0.85); }
 .radar-scan {
   position: absolute;
   inset: 0;

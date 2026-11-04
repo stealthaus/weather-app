@@ -1,6 +1,7 @@
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { RADAR_DOMAIN, radarFrames, radarImageUrl, type RadarFrame } from '../api/radar';
+import { addBasemap, fitMinZoom, MAP_BOUNDS } from '../lib/basemap';
 import { contourCodes, LEVEL_COLORS, MODEL_PALETTE, paintCodes, RADAR_PALETTE } from '../lib/contour';
 import { hhmm } from '../lib/format';
 import type { Place } from '../lib/places';
@@ -121,15 +122,14 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     zoomControl: false,
     attributionControl: true,
     minZoom: 5,
-    maxZoom: 12,
+    maxZoom: 11,
+    maxBounds: MAP_BOUNDS,
+    maxBoundsViscosity: 1,
   }).setView([place.lat, place.lon], 8);
   map.attributionControl.setPrefix(false);
+  map.attributionControl.addAttribution('Karte: <a href="https://www.naturalearthdata.com">Natural Earth</a> · Radar © <a href="https://www.dwd.de">DWD</a>');
 
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19,
-    className: 'basemap',
-    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · Radar © <a href="https://www.dwd.de">DWD</a>',
-  }).addTo(map);
+  addBasemap(map, [place.lat, place.lon]);
   new GridLines({ tileSize: 128, zIndex: 2 }).addTo(map);
   L.marker([place.lat, place.lon], {
     icon: L.divIcon({ className: '', html: '<div class="loc-dot"></div>', iconSize: [14, 14], iconAnchor: [7, 7] }),
@@ -386,7 +386,10 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   loadFrames();
 
   // Leaflet needs a size recalculation once the flex layout has settled.
-  const ro = new ResizeObserver(() => map.invalidateSize());
+  const ro = new ResizeObserver(() => {
+    map.invalidateSize();
+    map.setMinZoom(fitMinZoom(map));
+  });
   ro.observe(el.querySelector('#map')!);
 
   return () => {

@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "icons": "python3 scripts/make-icons.py"
+    "icons": "python3 scripts/make-icons.py",
+    "basemap": "bash scripts/make-basemap.sh"
   },
   "dependencies": {
     "@fontsource/monoton": "^5.3.0",

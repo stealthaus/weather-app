@@ -9,8 +9,8 @@ const LEVEL_NAMES = ['LEICHT', 'MÄSSIG', 'STARK', 'HAGEL'];
 const PAST_MIN = 60;
 const STEPS = [5, 15, 30] as const;
 type Step = (typeof STEPS)[number];
-/** Shorter frame duration for finer steps, so a loop takes roughly the same time. */
-const FRAME_MS: Record<Step, number> = { 5: 280, 15: 550, 30: 800 };
+/** Same speed for every step; finer steps just take longer to play through. */
+const FRAME_MS = 500;
 const PREF_STEP = 'wx.radar.step';
 /** The DWD GeoServer is slow (0.5–2 s per image); more parallel requests only queue up. */
 const PARALLEL = 4;
@@ -322,9 +322,14 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   };
   const play = () => {
     if (!frames.length) return;
+    // Plays once up to the end of the forecast and stops there; from the end it starts over.
+    if (index >= frames.length - 1) show(0);
     panel.play.textContent = '❚❚';
     panel.play.setAttribute('aria-label', 'Animation anhalten');
-    timer = window.setInterval(() => show((index + 1) % frames.length), FRAME_MS[step]);
+    timer = window.setInterval(() => {
+      show(index + 1);
+      if (index >= frames.length - 1) stop();
+    }, FRAME_MS);
   };
 
   panel.play.addEventListener('click', () => (timer ? stop() : play()));

@@ -412,6 +412,51 @@ section.block {
 .osd-clock { right: max(16px, env(safe-area-inset-right)); top: 12px; text-align: right; }
 .osd-clock small { display: block; font-size: 18px; opacity: 0.85; }
 .radar-progress { left: max(16px, env(safe-area-inset-left)); top: 46px; font-size: 18px; color: var(--cyan); animation: blink 1s steps(1) infinite; }
+/* Loading screen: percentage and block bar, the map stays visible underneath. */
+.radar-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 445;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  pointer-events: none;
+  font-family: var(--vhs);
+  color: #fff;
+  text-shadow: var(--rgb-split);
+  background: rgba(5, 1, 18, 0.55);
+  transition: opacity 0.4s, visibility 0.4s;
+}
+.radar-loading.off { opacity: 0; visibility: hidden; }
+.radar-loading-label { font-size: 24px; letter-spacing: 0.25em; color: var(--cyan); animation: blink 1s steps(1) infinite; }
+.radar-loading-pct { font-size: 84px; line-height: 0.9; font-variant-numeric: tabular-nums; }
+.radar-loading-bar { width: min(240px, 60vw); height: 18px; padding: 2px; border: 2px solid #fff; box-shadow: 0 0 8px rgba(255, 255, 255, 0.35); }
+.radar-loading-bar i {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: repeating-linear-gradient(90deg, var(--cyan) 0 8px, transparent 8px 11px);
+  filter: drop-shadow(0 0 4px var(--cyan));
+  transition: width 0.2s;
+}
+/* Step selector below the clock. */
+.radar-steps { position: absolute; z-index: 450; right: max(16px, env(safe-area-inset-right)); top: 66px; display: flex; gap: 4px; }
+.radar-steps button {
+  min-width: 44px;
+  height: 30px;
+  padding: 0 6px;
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  border-radius: 2px;
+  background: rgba(11, 2, 33, 0.6);
+  font-family: var(--vhs);
+  font-size: 20px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+}
+.radar-steps button[aria-pressed='true'] { border-color: #fff; color: #fff; text-shadow: var(--rgb-split); box-shadow: 0 0 8px rgba(255, 255, 255, 0.45); }
+.radar-steps button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 @keyframes blink { 50% { opacity: 0.3; } }
 .radar-panel {
   position: absolute;
@@ -447,6 +492,7 @@ section.block {
 .tape-bars i.fc { background: rgba(249, 200, 14, 0.22); }
 .tape-bars i.fc.played { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
 .tape-bars i.now { height: 24px; }
+.tape-bars.dense { gap: 1px; }
 /* Invisible range input on top of the bars keeps drag, tap and keyboard control. */
 .tape input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
 .tape:has(input:focus-visible) { outline: 2px solid var(--cyan); outline-offset: 2px; }

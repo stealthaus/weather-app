@@ -5,6 +5,9 @@ const CAPABILITIES = 'https://maps.dwd.de/geoserver/dwd/Radar_wn-product_1x1km_g
 const NOWCAST_MS = 2 * 60 * 60 * 1000;
 const STEP_MS = 5 * 60 * 1000;
 
+/** Geographic extent of the layer (from GetCapabilities); outside of it the WMS only returns transparency. */
+export const RADAR_DOMAIN = { south: 45.68, west: 1.46, north: 56.22, east: 18.73 };
+
 export interface RadarFrame {
   time: Date;
   forecast: boolean;
@@ -33,8 +36,27 @@ async function latestTimes(): Promise<{ analysis: Date; end: Date }> {
   return { end: new Date(end), analysis: new Date(end - NOWCAST_MS) };
 }
 
+/** One GetMap image for an EPSG:3857 bounding box [minX, minY, maxX, maxY] in metres. */
+export function radarImageUrl(time: Date, bbox: number[], width: number, height: number): string {
+  const p = new URLSearchParams({
+    service: 'WMS',
+    request: 'GetMap',
+    version: '1.3.0',
+    layers: RADAR_LAYER,
+    styles: '',
+    format: 'image/png',
+    transparent: 'true',
+    crs: 'EPSG:3857',
+    bbox: bbox.map((v) => v.toFixed(1)).join(','),
+    width: String(width),
+    height: String(height),
+    time: time.toISOString(),
+  });
+  return `${RADAR_WMS}?${p}`;
+}
+
 /** Frames from `pastMin` before the latest measurement up to the end of the nowcast. */
-export async function radarFrames(pastMin = 60, stepMin = 10): Promise<RadarFrame[]> {
+export async function radarFrames(pastMin = 60, stepMin = 15): Promise<RadarFrame[]> {
   let analysis: Date;
   let end: Date;
   try {

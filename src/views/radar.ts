@@ -1,8 +1,10 @@
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { fieldGrid, latticeSize, latticeStep, type FieldGrid, type FieldKind } from '../api/fields';
 import { GLOBAL_LAYER, globalTime, RADAR_DOMAIN, radarFrames, radarImageUrl, type RadarFrame } from '../api/radar';
 import { addBasemap, BASEMAP_ATTRIBUTION, fitMinZoom, MAP_BOUNDS } from '../lib/basemap';
 import { contourCodes, coverageMask, GLOBAL_PALETTE, LEVEL_COLORS, MODEL_PALETTE, paintCodes, RADAR_PALETTE, type Palette } from '../lib/contour';
+import { legendGradient, renderField, sampleField } from '../lib/field';
 import { hhmm } from '../lib/format';
 import type { Place } from '../lib/places';
 
@@ -10,12 +12,41 @@ const LEVEL_NAMES = ['LEICHT', 'MÄSSIG', 'STARK', 'HAGEL'];
 const PAST_MIN = 60;
 const STEPS = [5, 15, 30, 60] as const;
 type Step = (typeof STEPS)[number];
-/** How far ahead each step reaches. Beyond the 2 h nowcast, hourly model frames take over. */
-const HORIZON_MIN: Record<Step, number> = { 5: 120, 15: 120, 30: 6 * 60, 60: 12 * 60 };
+const HOUR_MS = 60 * 60 * 1000;
+/**
+ * Last frame time for each step. Beyond the 2 h nowcast, hourly model frames take over;
+ * the hourly step reaches to the end of the third day after today.
+ */
+const HORIZON: Record<Step, (analysis: Date) => number> = {
+  5: (a) => a.getTime() + 2 * HOUR_MS,
+  15: (a) => a.getTime() + 2 * HOUR_MS,
+  30: (a) => a.getTime() + 6 * HOUR_MS,
+  60: (a) => {
+    const end = new Date(a);
+    end.setHours(0, 0, 0, 0);
+    end.setDate(end.getDate() + 4);
+    return end.getTime() - HOUR_MS;
+  },
+};
 const stepLabel = (s: Step) => (s < 60 ? `${s}M` : `${s / 60}H`);
-/** Same speed for every step; finer steps just take longer to play through. */
-const FRAME_MS = 500;
+
+type Kind = 'rain' | FieldKind;
+const KINDS: { kind: Kind; label: string; name: string }[] = [
+  { kind: 'rain', label: 'REGEN', name: 'Regen' },
+  { kind: 'clouds', label: 'WOLKEN', name: 'Wolken' },
+  { kind: 'temp', label: 'TEMP', name: 'Temperatur' },
+  { kind: 'wind', label: 'WIND', name: 'Wind' },
+];
+const FIELD_LEGEND: Record<FieldKind, [string, string]> = {
+  clouds: ['0 %', '100 %'],
+  temp: ['−10°', '30°'],
+  wind: ['0', '100 KM/H'],
+};
+
+/** Long time axes play faster, so three days take about 25 seconds. */
+const frameMs = (n: number) => (n > 40 ? 300 : 500);
 const PREF_STEP = 'wx.radar.step';
+const PREF_KIND = 'wx.radar.kind';
 /** The DWD GeoServer is slow (0.5–2 s per image); more parallel requests only queue up. */
 const PARALLEL = 4;
 /** Extra margin around the viewport, so small pans need no reload. */
@@ -24,6 +55,13 @@ const PAD = 0.2;
 const MAX_PIXELS = 1_000_000;
 /** The ICON global grid is ~28 km, so its images can be coarser. */
 const GLOBAL_MAX_PIXELS = 400_000;
+/** Model fields are smooth: about half the CSS resolution on a phone, so a frame paints in a few ms. */
+const FIELD_MAX_PIXELS = 150_000;
+/** Open-Meteo counts every lattice point as one API call. */
+const MAX_FIELD_POINTS = 400;
+/** Distance of the value labels on the map in screen pixels. */
+const LABEL_DX = 84;
+const LABEL_DY = 76;
 
 const DOMAIN = L.latLngBounds([RADAR_DOMAIN.south, RADAR_DOMAIN.west], [RADAR_DOMAIN.north, RADAR_DOMAIN.east]);
 const WORLD = L.latLngBounds([-85, -180], [85, 180]);
@@ -76,12 +114,25 @@ function counter(min: number): string {
   return `${min < 0 ? '−' : min > 0 ? '+' : ' '}${Math.floor(a / 60)}:${String(a % 60).padStart(2, '0')}`;
 }
 
-function savedStep(): Step {
+/** "DO 05.11." */
+const dayLabel = (d: Date) => d.toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' }).replace(',', '').toUpperCase();
+const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+
+function saved<T>(key: string, valid: readonly T[], parse: (v: string) => T, fallback: T): T {
   try {
-    const v = Number(localStorage.getItem(PREF_STEP));
-    return (STEPS as readonly number[]).includes(v) ? (v as Step) : 15;
+    const raw = localStorage.getItem(key);
+    const v = raw == null ? fallback : parse(raw);
+    return valid.includes(v) ? v : fallback;
   } catch {
-    return 15;
+    return fallback;
+  }
+}
+
+function store(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* ignore */
   }
 }
 
@@ -105,36 +156,42 @@ function loadImage(url: string, inflight: Set<HTMLImageElement>): Promise<HTMLIm
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export function mountRadar(el: HTMLElement, place: Place): () => void {
-  const day = new Date()
-    .toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' })
-    .replace(',', '')
-    .toUpperCase();
-  let step = savedStep();
+  let step = saved<Step>(PREF_STEP, STEPS, Number as (v: string) => Step, 15);
+  let kind = saved<Kind>(
+    PREF_KIND,
+    KINDS.map((k) => k.kind),
+    (v) => v as Kind,
+    'rain',
+  );
   el.innerHTML = `
     <div class="radar-wrap">
-      <div id="map" aria-label="Regenradar-Karte"></div>
+      <div id="map"></div>
       <div class="radar-scan" aria-hidden="true"></div>
-      <div class="radar-loading" role="progressbar" aria-label="Radar lädt" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <div class="radar-loading" role="progressbar" aria-label="Karte lädt" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
         <span class="radar-loading-label">TRACKING</span>
         <span class="radar-loading-pct">0%</span>
         <span class="radar-loading-bar"><i></i></span>
       </div>
       <div class="osd osd-mode" aria-live="polite">LÄDT …</div>
-      <div class="osd osd-clock"><span class="radar-time">–:–</span><small>${day}</small></div>
+      <div class="osd osd-clock"><span class="radar-time">–:–</span><small class="radar-day">${dayLabel(new Date())}</small></div>
       <div class="osd radar-progress" hidden></div>
       <div class="radar-steps" role="group" aria-label="Zeitschritt">
         ${STEPS.map((s) => `<button type="button" data-step="${s}" aria-pressed="${s === step}" aria-label="${s < 60 ? `${s} Minuten` : `${s / 60} Stunde`}">${stepLabel(s)}</button>`).join('')}
       </div>
       <div class="radar-panel">
+        <div class="radar-kinds" role="group" aria-label="Kartenebene">
+          ${KINDS.map((k) => `<button type="button" data-kind="${k.kind}" aria-pressed="${k.kind === kind}" aria-label="${k.name}">${k.label}</button>`).join('')}
+        </div>
         <div class="radar-row">
           <button type="button" class="vhs-key" aria-label="Animation abspielen">▶</button>
           <div class="tape">
             <div class="tape-bars" aria-hidden="true"></div>
             <input type="range" min="0" max="0" value="0" step="1" aria-label="Zeitpunkt" />
+            <div class="tape-days" role="group" aria-label="Tag wählen"></div>
           </div>
           <span class="tape-counter"> 0:00</span>
         </div>
-        <div class="radar-legend">${LEVEL_NAMES.map((n, i) => `<span style="color:${LEVEL_COLORS[i]}"><i></i>${n}</span>`).join('')}</div>
+        <div class="radar-legend"></div>
       </div>
     </div>`;
 
@@ -149,19 +206,24 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     bounceAtZoomLimits: false,
   }).setView([place.lat, place.lon], 8);
   map.attributionControl.setPrefix(false);
-  map.attributionControl.addAttribution(`${BASEMAP_ATTRIBUTION} · Radar © <a href="https://www.dwd.de">DWD</a>`);
+  // The field layers show no DWD data, so each layer names only its own source.
+  const RAIN_ATTRIBUTION = `${BASEMAP_ATTRIBUTION} · Radar © <a href="https://www.dwd.de">DWD</a>`;
+  const FIELD_ATTRIBUTION = `${BASEMAP_ATTRIBUTION} · Modell © <a href="https://open-meteo.com">Open-Meteo</a>`;
 
   addBasemap(map, [place.lat, place.lon]);
   new GridLines({ tileSize: 128, zIndex: 2 }).addTo(map);
+  // Value labels of the model fields sit below the location dot.
+  const labels = L.layerGroup().addTo(map);
   L.marker([place.lat, place.lon], {
     icon: L.divIcon({ className: '', html: '<div class="loc-dot"></div>', iconSize: [14, 14], iconAnchor: [7, 7] }),
     interactive: false,
     keyboard: false,
+    zIndexOffset: 1000,
   }).addTo(map);
 
-  // Two canvases show the current frame: ICON global below (whole world, coarse) and the radar or
-  // ICON-EU frame above (radar domain). SVGOverlay positions any element like an image (including
-  // zoom animation), so it can carry a canvas.
+  // Two canvases show the current rain frame: ICON global below (whole world, coarse) and the radar or
+  // ICON-EU frame above (radar domain). A third one shows the model fields. SVGOverlay positions any
+  // element like an image (including zoom animation), so it can carry a canvas.
   const layer = (): Layer => {
     const canvas = document.createElement('canvas');
     canvas.width = canvas.height = 1;
@@ -170,6 +232,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   };
   const world = layer();
   const fine = layer();
+  const field = layer();
   // Where the fine frame has data; cut out of the global layer so the rain is not shown twice.
   const mask = document.createElement('canvas');
   const mctx = mask.getContext('2d')!;
@@ -182,14 +245,20 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     play: el.querySelector<HTMLButtonElement>('.vhs-key')!,
     range: el.querySelector<HTMLInputElement>('input[type=range]')!,
     bars: el.querySelector<HTMLElement>('.tape-bars')!,
+    days: el.querySelector<HTMLElement>('.tape-days')!,
+    row: el.querySelector<HTMLElement>('.radar-row')!,
     counter: el.querySelector<HTMLElement>('.tape-counter')!,
     time: el.querySelector<HTMLElement>('.radar-time')!,
+    day: el.querySelector<HTMLElement>('.radar-day')!,
     mode: el.querySelector<HTMLElement>('.osd-mode')!,
     progress: el.querySelector<HTMLElement>('.radar-progress')!,
     loading: el.querySelector<HTMLElement>('.radar-loading')!,
     loadingPct: el.querySelector<HTMLElement>('.radar-loading-pct')!,
     loadingBar: el.querySelector<HTMLElement>('.radar-loading-bar i')!,
     steps: el.querySelector<HTMLElement>('.radar-steps')!,
+    kinds: el.querySelector<HTMLElement>('.radar-kinds')!,
+    legend: el.querySelector<HTMLElement>('.radar-legend')!,
+    map: el.querySelector<HTMLElement>('#map')!,
   };
 
   let frames: RadarFrame[] = [];
@@ -207,29 +276,43 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   let generation = 0;
   const inflight = new Set<HTMLImageElement>();
 
+  /** Model fields: canvas area, latitude/longitude per canvas row/column, and the newest loaded grid. */
+  let fieldView: View | null = null;
+  let fieldAxes: { rowLat: Float64Array; colLon: Float64Array } | null = null;
+  let grid: FieldGrid | null = null;
+  let fieldRequest: { cancelled: boolean } | null = null;
+  let fieldLabels: { el: HTMLElement; lat: number; lon: number }[] = [];
+
   // ---- drawing --------------------------------------------------------------
+
+  const clear = (l: Layer) => l.ctx.clearRect(0, 0, l.canvas.width, l.canvas.height);
+
+  /** Sizes a layer's canvas for a view. */
+  const fit = (l: Layer, v: View): ImageData => {
+    if (l.shown?.view !== v) {
+      l.canvas.width = v.w;
+      l.canvas.height = v.h;
+      l.overlay.setBounds(v.bounds);
+      l.shown = { view: v, img: l.ctx.createImageData(v.w, v.h) };
+    }
+    return l.shown.img;
+  };
 
   /** Draws a loaded frame into a layer; false if there is nothing to draw. */
   const draw = (l: Layer, d: FrameData | undefined): boolean => {
     if (!d) {
-      l.ctx.clearRect(0, 0, l.canvas.width, l.canvas.height);
+      clear(l);
       return false;
     }
-    if (l.shown?.view !== d.view) {
-      l.canvas.width = d.view.w;
-      l.canvas.height = d.view.h;
-      l.overlay.setBounds(d.view.bounds);
-      l.shown = { view: d.view, img: l.ctx.createImageData(d.view.w, d.view.h) };
-    }
-    paintCodes(d.codes, l.shown.img);
-    l.ctx.putImageData(l.shown.img, 0, 0);
+    const img = fit(l, d.view);
+    paintCodes(d.codes, img);
+    l.ctx.putImageData(img, 0, 0);
     return true;
   };
 
-  const paint = () => {
-    const f = frames[index];
-    const d = f && cache.get(key(f));
-    const g = f && cache.get(worldKey(f));
+  const paintRain = (f: RadarFrame) => {
+    const d = f.layer ? cache.get(key(f)) : undefined;
+    const g = cache.get(worldKey(f));
     draw(fine, d);
     if (!draw(world, g) || !g || !d || d.view.zoom !== g.view.zoom) return;
     const { w, h, px } = d.view;
@@ -250,17 +333,58 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     c.globalCompositeOperation = 'source-over';
   };
 
+  const paintField = (k: FieldKind, f: RadarFrame) => {
+    if (!grid || !fieldView || !fieldAxes) return clear(field);
+    const img = fit(field, fieldView);
+    const t = f.time.getTime();
+    renderField(grid, k, t, fieldAxes.rowLat, fieldAxes.colLon, img);
+    field.ctx.putImageData(img, 0, 0);
+    for (const l of fieldLabels) {
+      const s = sampleField(grid, k, l.lat, l.lon, t);
+      if (Number.isNaN(s.value)) l.el.textContent = '';
+      else if (k === 'temp') l.el.textContent = `${Math.round(s.value)}°`;
+      else l.el.innerHTML = `<b style="transform:rotate(${Math.round(s.to ?? 0)}deg)">↑</b>${Math.round(s.value)}`;
+    }
+  };
+
+  const paint = () => {
+    const f = frames[index];
+    if (!f) return;
+    if (kind === 'rain') {
+      clear(field);
+      paintRain(f);
+    } else {
+      clear(world);
+      clear(fine);
+      paintField(kind, f);
+    }
+  };
+
   const show = (i: number) => {
     index = i;
     paint();
     const f = frames[i];
     const diff = Math.round((f.time.getTime() - frames[nowIdx].time.getTime()) / 60000);
     panel.range.value = String(i);
-    const kind = f.model ? 'Modellvorhersage' : f.forecast ? 'Vorhersage' : diff === 0 ? 'letzte Messung' : 'Messung';
-    panel.range.setAttribute('aria-valuetext', `${hhmm(f.time)}, ${kind}${diff ? ` ${counter(diff).trim()} h` : ''}`);
+    const rain = kind === 'rain';
+    const what = rain ? (f.model ? 'Modellvorhersage' : f.forecast ? 'Vorhersage' : diff === 0 ? 'letzte Messung' : 'Messung') : 'Modell';
+    panel.range.setAttribute('aria-valuetext', `${dayLabel(f.time)} ${hhmm(f.time)}, ${what}${diff ? ` ${counter(diff).trim()} h` : ''}`);
     panel.time.textContent = hhmm(f.time);
+    panel.day.textContent = dayLabel(f.time);
     panel.counter.textContent = counter(diff);
-    panel.mode.textContent = f.model ? '▶▶ MODELL' : f.forecast ? '▶▶ PROGNOSE' : diff === 0 ? '● LIVE' : '◀ ARCHIV';
+    panel.mode.textContent = rain
+      ? f.model
+        ? '▶▶ MODELL'
+        : f.forecast
+          ? '▶▶ PROGNOSE'
+          : diff === 0
+            ? '● LIVE'
+            : '◀ ARCHIV'
+      : diff > 0
+        ? '▶▶ MODELL'
+        : diff === 0
+          ? '● JETZT'
+          : '◀ MODELL';
     panel.mode.classList.toggle('fc', f.forecast);
     [...panel.bars.children].forEach((b, j) => b.classList.toggle('played', j <= i));
   };
@@ -277,6 +401,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     panel.loading.setAttribute('aria-valuenow', String(pct));
     panel.loading.classList.toggle('off', finished || !bigLoader);
     panel.progress.textContent = `TRACKING ${pct}%`;
+    panel.progress.classList.remove('err');
     panel.progress.hidden = finished || bigLoader;
   };
 
@@ -336,9 +461,15 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     }
   };
 
+  /** Stops all radar downloads (on reload, or when switching to a model field). */
+  const cancelRain = () => {
+    generation++;
+    inflight.forEach((img) => (img.src = ''));
+    inflight.clear();
+  };
+
   /** Loads every radar/ICON-EU frame and every ICON global image that has no data for the current view yet. */
-  const sync = () => {
-    if (!alive || !frames.length) return;
+  const syncRain = () => {
     const v = neededView(DOMAIN, view, MAX_PIXELS);
     const wv = neededView(WORLD, worldView, GLOBAL_MAX_PIXELS);
     if (v) view = v;
@@ -346,7 +477,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     const jobs: Job[] = [];
     if (v) {
       for (const f of frames) {
-        if (cache.get(key(f))?.view !== v) jobs.push({ key: key(f), layer: f.layer, time: f.time, view: v, palette: f.model ? MODEL_PALETTE : RADAR_PALETTE });
+        if (f.layer && cache.get(key(f))?.view !== v) jobs.push({ key: key(f), layer: f.layer, time: f.time, view: v, palette: f.model ? MODEL_PALETTE : RADAR_PALETTE });
       }
     }
     if (wv) {
@@ -360,14 +491,13 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     }
     if (!jobs.length) return progress(1, 1);
 
-    const gen = ++generation;
-    inflight.forEach((img) => (img.src = ''));
-    inflight.clear();
+    cancelRain();
+    const gen = generation;
     // What the visible frame needs first, then in time order.
     const current = frames[index];
     const now = new Set([key(current), worldKey(current)]);
     jobs.sort((a, b) => Number(now.has(b.key)) - Number(now.has(a.key)) || a.time.getTime() - b.time.getTime());
-    bigLoader = !cache.has(v ? key(current) : worldKey(current));
+    bigLoader = !cache.has(v && current.layer ? key(current) : worldKey(current));
     const total = jobs.length;
     let done = 0;
     progress(0, total);
@@ -377,11 +507,85 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
         await fetchFrame(job, gen);
         if (gen !== generation || !alive) return;
         done++;
-        if (job.key === key(frames[index]) || job.key === worldKey(frames[index])) paint();
+        if (job.key === key(frames[index]) || job.key === worldKey(frames[index])) {
+          paint();
+          // The visible frame is there; the rest (up to three days of frames) loads in the corner.
+          bigLoader = false;
+        }
         progress(done, total);
       }
     };
     for (let i = 0; i < PARALLEL; i++) worker();
+  };
+
+  /** Value labels on a screen-aligned lattice over the visible map. */
+  const placeLabels = () => {
+    labels.clearLayers();
+    fieldLabels = [];
+    if (kind !== 'temp' && kind !== 'wind') return;
+    const size = map.getSize();
+    for (let row = 0, y = LABEL_DY / 2; y < size.y; row++, y += LABEL_DY) {
+      for (let x = (row % 2 ? LABEL_DX : LABEL_DX / 2) / 2 + 8; x < size.x; x += LABEL_DX) {
+        const ll = map.containerPointToLatLng([x, y]);
+        const el = document.createElement('span');
+        el.className = 'field-label';
+        labels.addLayer(L.marker(ll, { icon: L.divIcon({ className: 'field-label-icon', html: el, iconSize: [0, 0] }), interactive: false, keyboard: false }));
+        fieldLabels.push({ el, lat: ll.lat, lon: ll.lng });
+      }
+    }
+  };
+
+  /** Loads the model field for the current view (one request for all hours and all three fields). */
+  const syncField = async () => {
+    const v = neededView(WORLD, fieldView, FIELD_MAX_PIXELS);
+    if (!v) return;
+    if (v !== fieldView) {
+      fieldView = v;
+      const rowLat = new Float64Array(v.h);
+      const colLon = new Float64Array(v.w);
+      const sx = (v.px.max!.x - v.px.min!.x) / v.w;
+      const sy = (v.px.max!.y - v.px.min!.y) / v.h;
+      for (let y = 0; y < v.h; y++) rowLat[y] = map.unproject([v.px.min!.x, v.px.min!.y + (y + 0.5) * sy], v.zoom).lat;
+      for (let x = 0; x < v.w; x++) colLon[x] = map.unproject([v.px.min!.x + (x + 0.5) * sx, v.px.min!.y], v.zoom).lng;
+      fieldAxes = { rowLat, colLon };
+    }
+    placeLabels();
+    paint();
+
+    const b = v.bounds;
+    const area = { south: b.getSouth(), west: b.getWest(), north: b.getNorth(), east: b.getEast() };
+    let s = latticeStep(v.zoom);
+    while (latticeSize(area, s) > MAX_FIELD_POINTS) s *= 2;
+    // The loaded grid already covers this area at this or a finer spacing.
+    if (grid && grid.step <= s && grid.south <= area.south && grid.west <= area.west && grid.south + (grid.ny - 1) * grid.step >= area.north && grid.west + (grid.nx - 1) * grid.step >= area.east && Date.now() - grid.t0 < 3 * HOUR_MS) {
+      return progress(1, 1);
+    }
+    if (fieldRequest) fieldRequest.cancelled = true;
+    const req = { cancelled: false };
+    fieldRequest = req;
+    bigLoader = !grid;
+    progress(0, 1);
+    try {
+      const g = await fieldGrid(area, s, req);
+      if (!alive || req.cancelled || !g) return;
+      grid = g;
+      progress(1, 1);
+      paint();
+    } catch {
+      if (!alive || req.cancelled) return;
+      progress(1, 1);
+      panel.progress.textContent = 'KEIN SIGNAL';
+      panel.progress.classList.add('err');
+      panel.progress.hidden = false;
+    } finally {
+      if (fieldRequest === req) fieldRequest = null;
+    }
+  };
+
+  const sync = () => {
+    if (!alive || !frames.length) return;
+    if (kind === 'rain') syncRain();
+    else syncField();
   };
 
   let syncTimer = 0;
@@ -408,7 +612,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     timer = window.setInterval(() => {
       show(index + 1);
       if (index >= frames.length - 1) stop();
-    }, FRAME_MS);
+    }, frameMs(frames.length));
   };
 
   panel.play.addEventListener('click', () => (timer ? stop() : play()));
@@ -417,7 +621,56 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     show(Number(panel.range.value));
   });
 
-  // ---- frames and step ------------------------------------------------------
+  // ---- frames, step and layer -----------------------------------------------
+
+  /** Day marks under the tape: tap one to jump to noon of that day (today: to now). */
+  const renderDays = () => {
+    const starts: number[] = [];
+    frames.forEach((f, i) => {
+      if (!i || dayKey(f.time) !== dayKey(frames[i - 1].time)) starts.push(i);
+    });
+    if (starts.length < 2) {
+      panel.days.innerHTML = '';
+      panel.row.classList.remove('has-days');
+      return;
+    }
+    const today = dayKey(new Date());
+    const n = frames.length;
+    panel.days.innerHTML = starts
+      .map((s, j) => {
+        const end = starts[j + 1] ?? n;
+        const d = frames[s].time;
+        const isToday = dayKey(d) === today;
+        // Too narrow for a label (e.g. only the last hour of today): just the tick.
+        const label = (end - s) / n < 0.12 ? '' : isToday ? 'HEUTE' : dayLabel(d).slice(0, 2);
+        return `<button type="button" data-day="${s}" style="left:${(s / n) * 100}%;width:${((end - s) / n) * 100}%" aria-label="${isToday ? 'Heute' : d.toLocaleDateString('de-DE', { weekday: 'long' })}">${label}</button>`;
+      })
+      .join('');
+    panel.row.classList.add('has-days');
+  };
+
+  panel.days.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-day]');
+    if (!btn) return;
+    const start = Number(btn.dataset.day);
+    const day = dayKey(frames[start].time);
+    let target = start;
+    if (day === dayKey(frames[nowIdx].time)) target = nowIdx;
+    else {
+      // Noon, or the frame closest to it.
+      let best = Infinity;
+      for (let i = start; i < frames.length && dayKey(frames[i].time) === day; i++) {
+        const t = frames[i].time;
+        const d = Math.abs(t.getHours() * 60 + t.getMinutes() - 12 * 60);
+        if (d < best) {
+          best = d;
+          target = i;
+        }
+      }
+    }
+    stop();
+    show(target);
+  });
 
   let framesRequest = 0;
   const loadFrames = async () => {
@@ -425,7 +678,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     const wasPlaying = !!timer;
     stop();
     const prevTime = frames[index]?.time.getTime();
-    const next = await radarFrames(PAST_MIN, step, HORIZON_MIN[step]);
+    const next = await radarFrames(PAST_MIN, step, HORIZON[step]);
     if (!alive || req !== framesRequest) return;
     frames = next;
     const keys = new Set([...frames.map(key), ...frames.map(worldKey)]);
@@ -434,6 +687,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     panel.bars.innerHTML = frames.map((f, i) => `<i class="${f.model ? 'fc md' : f.forecast ? 'fc' : ''}${i === nowIdx ? ' now' : ''}"></i>`).join('');
     panel.bars.classList.toggle('dense', frames.length > 20);
     panel.range.max = String(frames.length - 1);
+    renderDays();
     // Stay at the same time when switching the step, if that time still exists.
     const keep = frames.findIndex((f) => f.time.getTime() === prevTime);
     index = keep >= 0 ? keep : nowIdx;
@@ -448,15 +702,56 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     const s = Number(btn.dataset.step) as Step;
     if (s === step) return;
     step = s;
-    try {
-      localStorage.setItem(PREF_STEP, String(s));
-    } catch {
-      /* ignore */
-    }
+    store(PREF_STEP, String(s));
     panel.steps.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
     loadFrames();
   });
 
+  let attribution = '';
+  const setAttribution = (text: string) => {
+    if (text === attribution) return;
+    if (attribution) map.attributionControl.removeAttribution(attribution);
+    map.attributionControl.addAttribution(text);
+    attribution = text;
+  };
+
+  /** Legend, map label and attribution of the current layer. */
+  const applyKind = () => {
+    const k = KINDS.find((x) => x.kind === kind)!;
+    panel.kinds.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.kind === kind)));
+    panel.map.setAttribute('aria-label', `Karte: ${k.name}`);
+    if (kind === 'rain') {
+      panel.legend.className = 'radar-legend';
+      panel.legend.innerHTML = LEVEL_NAMES.map((n, i) => `<span style="color:${LEVEL_COLORS[i]}"><i></i>${n}</span>`).join('');
+      setAttribution(RAIN_ATTRIBUTION);
+    } else {
+      const [lo, hi] = FIELD_LEGEND[kind];
+      panel.legend.className = 'radar-legend field';
+      panel.legend.innerHTML = `<span>${lo}</span><i style="background:${legendGradient(kind)}"></i><span>${hi}</span>`;
+      setAttribution(FIELD_ATTRIBUTION);
+    }
+  };
+
+  panel.kinds.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-kind]');
+    if (!btn) return;
+    const k = btn.dataset.kind as Kind;
+    if (k === kind) return;
+    kind = k;
+    store(PREF_KIND, k);
+    applyKind();
+    if (kind === 'rain') {
+      if (fieldRequest) fieldRequest.cancelled = true;
+      labels.clearLayers();
+      fieldLabels = [];
+    } else cancelRain();
+    // Cancelled rain frames are missing from the cache, so the next rain sync queues them again.
+    progress(1, 1);
+    sync();
+    show(index);
+  });
+
+  applyKind();
   loadFrames();
 
   // Leaflet needs a size recalculation once the flex layout has settled.
@@ -464,13 +759,12 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     map.invalidateSize();
     map.setMinZoom(fitMinZoom(map));
   });
-  ro.observe(el.querySelector('#map')!);
+  ro.observe(panel.map);
 
   return () => {
     alive = false;
-    generation++;
-    inflight.forEach((img) => (img.src = ''));
-    inflight.clear();
+    cancelRain();
+    if (fieldRequest) fieldRequest.cancelled = true;
     clearTimeout(syncTimer);
     stop();
     ro.disconnect();

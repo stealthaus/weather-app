@@ -13,7 +13,7 @@ const STOPS: [number, [number, number, number]][] = [
   [27, [176, 34, 58]], // deep red
 ];
 
-function rgbAt(t: number): [number, number, number] {
+export function tempRgb(t: number): [number, number, number] {
   if (t <= STOPS[0][0]) return STOPS[0][1];
   for (let i = 1; i < STOPS.length; i++) {
     const [t1, c1] = STOPS[i];
@@ -27,7 +27,7 @@ function rgbAt(t: number): [number, number, number] {
 }
 
 export function tempColor(t: number): string {
-  return `rgb(${rgbAt(t).join(' ')})`;
+  return `rgb(${tempRgb(t).join(' ')})`;
 }
 
 /** CSS gradient for a bar spanning lo..hi °C, with the scale's stops at their true positions. */

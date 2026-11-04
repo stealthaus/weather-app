@@ -523,10 +523,71 @@ section.block {
 /* Invisible range input on top of the bars keeps drag, tap and keyboard control. */
 .tape input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
 .tape:has(input:focus-visible) { outline: 2px solid var(--cyan); outline-offset: 2px; }
-.tape-counter { flex: none; min-width: 64px; text-align: right; font-size: 28px; white-space: pre; color: #fff; text-shadow: var(--rgb-split); }
+.tape-counter { flex: none; min-width: 6ch; text-align: right; font-size: 28px; white-space: pre; color: #fff; text-shadow: var(--rgb-split); }
 .radar-legend { display: flex; justify-content: space-between; margin-top: 8px; font-size: 18px; }
 .radar-legend span { display: flex; align-items: center; gap: 6px; }
 .radar-legend i { width: 14px; height: 10px; border: 2px solid currentColor; box-shadow: 0 0 6px currentColor; }
+/* Model fields: a colour bar between the ends of the scale. */
+.radar-legend.field { align-items: center; gap: 10px; }
+.radar-legend.field span { flex: none; color: #fff; }
+.radar-legend.field i { flex: 1; height: 10px; border: 1px solid rgba(255, 255, 255, 0.5); box-shadow: none; }
+/* Layer selector above the tape. */
+.radar-kinds { display: flex; gap: 4px; margin-bottom: 10px; }
+.radar-kinds button {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 4px;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 2px;
+  background: rgba(11, 2, 33, 0.6);
+  font-family: var(--vhs);
+  font-size: 20px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+}
+.radar-kinds button[aria-pressed='true'] { border-color: var(--cyan); color: #fff; text-shadow: var(--rgb-split); box-shadow: 0 0 8px rgba(45, 226, 230, 0.6), inset 0 0 10px rgba(45, 226, 230, 0.25); }
+.radar-kinds button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+/* Day marks under the tape (hourly step): tap to jump to that day. */
+.radar-row.has-days { margin-bottom: 24px; }
+.tape-days { position: absolute; left: 0; right: 0; top: 100%; height: 24px; }
+.tape-days button {
+  position: absolute;
+  top: 0;
+  height: 24px;
+  padding: 2px 0 0 4px;
+  border: 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.55);
+  background: none;
+  font-family: var(--vhs);
+  font-size: 18px;
+  line-height: 1;
+  text-align: left;
+  color: rgba(255, 255, 255, 0.8);
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+}
+.tape-days button:first-child { border-left-color: transparent; }
+.tape-days button:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
+.radar-progress.err { color: var(--danger); animation: none; }
+/* Values of the model fields on the map. */
+.field-label-icon { pointer-events: none; }
+.field-label {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  font-family: var(--vhs);
+  font-size: 19px;
+  line-height: 1;
+  white-space: nowrap;
+  color: #fff;
+  text-shadow: 0 0 3px #05010f, 0 0 6px #05010f, 0 0 2px #05010f;
+}
+.field-label b { display: inline-block; font-weight: 400; color: var(--cyan); }
 .leaflet-container { font-family: var(--font); background: var(--bg); }
 .leaflet-control-attribution { font-size: 10px !important; background: rgba(11, 2, 33, 0.7) !important; color: var(--text-3) !important; }
 .leaflet-control-attribution a { color: var(--cyan) !important; }

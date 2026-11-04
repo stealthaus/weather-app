@@ -2,11 +2,13 @@ export const RADAR_WMS = 'https://maps.dwd.de/geoserver/dwd/wms';
 export const RADAR_LAYER = 'dwd:Radar_wn-product_1x1km_ger';
 /** ICON-EU precipitation of the past hour (~7 km grid), continues the forecast after the 2 h nowcast. */
 export const MODEL_LAYER = 'dwd:Icon-eu_reg00625_fd_sl_TOTPREC01H';
-/** ICON global precipitation of the past 6 hours (~28 km grid, every 3 h): fills the rest of the world. */
+/** ICON global precipitation of the past 6 hours (~28 km grid): fills the rest of the world. */
 export const GLOBAL_LAYER = 'dwd:Icon_reg025_fd_sl_TOTPREC06H';
-const GLOBAL_STEP_MS = 3 * 60 * 60 * 1000;
+// Capabilities claim a 3-hour step, but only every 6 hours (00, 06, 12, 18 UTC) returns an image.
+const GLOBAL_STEP_MS = 6 * 60 * 60 * 1000;
 // Layer-scoped capabilities are ~40 KB instead of ~1 MB for the whole workspace.
 const CAPABILITIES = 'https://maps.dwd.de/geoserver/dwd/Radar_wn-product_1x1km_ger/wms?service=WMS&version=1.3.0&request=GetCapabilities';
+const MODEL_CAPABILITIES = 'https://maps.dwd.de/geoserver/dwd/Icon-eu_reg00625_fd_sl_TOTPREC01H/wms?service=WMS&version=1.3.0&request=GetCapabilities';
 const NOWCAST_MS = 2 * 60 * 60 * 1000;
 const STEP_MS = 5 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -17,9 +19,10 @@ export const RADAR_DOMAIN = { south: 45.68, west: 1.46, north: 56.22, east: 18.7
 export interface RadarFrame {
   time: Date;
   forecast: boolean;
-  /** Model forecast (hourly ICON-EU) instead of radar measurement or nowcast. */
+  /** Model forecast (hourly ICON-EU, later ICON global) instead of radar measurement or nowcast. */
   model: boolean;
-  layer: string;
+  /** Radar or ICON-EU layer; null after the end of the ICON-EU run, where only ICON global is shown. */
+  layer: string | null;
 }
 
 /** dBZ colour scale of the DWD layer (from GetLegendGraphic), mapped to neon contour levels in lib/contour. */
@@ -31,15 +34,16 @@ export const MODEL_COLORS = ['#C0C0C0', '#FEFEC0', '#FEFE5B', '#CFF200', '#A0D62
 /** mm per 6 h colour scale of the ICON global layer: 0.1, 0.5, 1, 2, 5, 10, 15, 20, 25, 30, 35, 40, 50, 60, 70, 80, 90, 100, 150, 200, 300 mm. */
 export const GLOBAL_COLORS = ['#DCF7C3', '#B9F77C', '#00E601', '#00BF01', '#008017', '#33B9FF', '#007DFF', '#FFC040', '#E69900', '#B37700', '#FF0000', '#CC0000', '#A60000', '#FE00FF', '#D800D9', '#BC00BF', '#A500A6', '#C7B3FF', '#AA8CFF', '#8E66FF', '#FFFFFF'];
 
-/** ICON global time whose 6-hour sum contains `t` (valid times are every 3 h). */
+/** ICON global time whose 6-hour sum contains `t`. */
 export function globalTime(t: Date): Date {
   return new Date(Math.ceil(t.getTime() / GLOBAL_STEP_MS) * GLOBAL_STEP_MS);
 }
 
-async function capabilitiesEnd(): Promise<number> {
-  const res = await fetch(`${CAPABILITIES}&_=${Date.now()}-${Math.random()}`);
+/** End of a layer's time dimension ("start/end/PTxx"). */
+async function capabilitiesEnd(url: string): Promise<number> {
+  const res = await fetch(`${url}&_=${Date.now()}-${Math.random()}`);
   if (!res.ok) throw new Error(String(res.status));
-  const m = (await res.text()).match(/<Dimension name="time"[^>]*>[^<]*\/([0-9T:.\-]+Z)\/PT5M/);
+  const m = (await res.text()).match(/<Dimension name="time"[^>]*>[^<]*\/([0-9T:.\-]+Z)\/PT\d+[HM]/);
   if (!m) throw new Error('no time dimension');
   return new Date(m[1]).getTime();
 }
@@ -50,7 +54,7 @@ async function capabilitiesEnd(): Promise<number> {
  * balancer whose nodes are not always in sync, so ask a few times and keep the newest.
  */
 async function latestTimes(): Promise<{ analysis: Date; end: Date }> {
-  const ends = await Promise.allSettled([capabilitiesEnd(), capabilitiesEnd(), capabilitiesEnd()]);
+  const ends = await Promise.allSettled([capabilitiesEnd(CAPABILITIES), capabilitiesEnd(CAPABILITIES), capabilitiesEnd(CAPABILITIES)]);
   const end = Math.max(...ends.map((r) => (r.status === 'fulfilled' ? r.value : 0)));
   if (end < Date.now() - 3 * 60 * 60 * 1000) throw new Error('radar data outdated');
   return { end: new Date(end), analysis: new Date(end - NOWCAST_MS) };
@@ -75,13 +79,23 @@ export function radarImageUrl(layer: string, time: Date, bbox: number[], width: 
   return `${RADAR_WMS}?${p}`;
 }
 
+/** Last hour of the newest ICON-EU run; requests beyond it only return an error. */
+async function modelEnd(): Promise<number> {
+  const ends = await Promise.allSettled([capabilitiesEnd(MODEL_CAPABILITIES), capabilitiesEnd(MODEL_CAPABILITIES)]);
+  const end = Math.max(...ends.map((r) => (r.status === 'fulfilled' ? r.value : 0)));
+  // Unknown: ICON-EU runs reach at least +78 h hourly.
+  return end || Date.now() + 72 * HOUR_MS;
+}
+
 /**
  * Frames from `pastMin` before the latest measurement up to the end of the nowcast (+2 h).
- * If `horizonMin` reaches further, hourly model frames follow up to that point.
+ * If `horizon` reaches further, hourly model frames follow up to that point: ICON-EU as long
+ * as its run lasts, then ICON global alone.
  */
-export async function radarFrames(pastMin = 60, stepMin = 15, horizonMin = 120): Promise<RadarFrame[]> {
+export async function radarFrames(pastMin: number, stepMin: number, horizon: (analysis: Date) => number): Promise<RadarFrame[]> {
   let analysis: Date;
   let end: Date;
+  const modelEndP = modelEnd();
   try {
     ({ analysis, end } = await latestTimes());
   } catch {
@@ -95,9 +109,11 @@ export async function radarFrames(pastMin = 60, stepMin = 15, horizonMin = 120):
   for (let t = analysis.getTime() - pastMin * 60 * 1000; t <= end.getTime(); t += step) {
     frames.push({ time: new Date(t), forecast: t > analysis.getTime(), model: false, layer: RADAR_LAYER });
   }
-  const horizon = analysis.getTime() + horizonMin * 60 * 1000;
-  for (let t = Math.floor(end.getTime() / HOUR_MS) * HOUR_MS + HOUR_MS; t <= horizon; t += HOUR_MS) {
-    frames.push({ time: new Date(t), forecast: true, model: true, layer: MODEL_LAYER });
+  const last = horizon(analysis);
+  if (last <= end.getTime()) return frames;
+  const lastModel = await modelEndP;
+  for (let t = Math.floor(end.getTime() / HOUR_MS) * HOUR_MS + HOUR_MS; t <= last; t += HOUR_MS) {
+    frames.push({ time: new Date(t), forecast: true, model: true, layer: t <= lastModel ? MODEL_LAYER : null });
   }
   return frames;
 }

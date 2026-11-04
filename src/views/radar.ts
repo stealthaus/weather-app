@@ -176,6 +176,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
       <div class="osd osd-mode" aria-live="polite">LÄDT …</div>
       <div class="osd osd-clock"><span class="radar-time">–:–</span><small class="radar-day">${dayLabel(new Date())}</small></div>
       <div class="osd radar-progress" hidden></div>
+      <div class="radar-notice" role="status" hidden></div>
       <div class="radar-steps" role="group" aria-label="Zeitschritt">
         ${STEPS.map((s) => `<button type="button" data-step="${s}" aria-pressed="${s === step}" aria-label="${s < 60 ? `${s} Minuten` : `${s / 60} Stunde`}">${stepLabel(s)}</button>`).join('')}
       </div>
@@ -260,6 +261,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     kinds: el.querySelector<HTMLElement>('.radar-kinds')!,
     legend: el.querySelector<HTMLElement>('.radar-legend')!,
     map: el.querySelector<HTMLElement>('#map')!,
+    notice: el.querySelector<HTMLElement>('.radar-notice')!,
   };
 
   let frames: RadarFrame[] = [];
@@ -283,6 +285,27 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   let grid: FieldGrid | null = null;
   let fieldRequest: { cancelled: boolean } | null = null;
   let fieldLabels: { el: HTMLElement; lat: number; lon: number }[] = [];
+  /** Open-Meteo's hourly/daily limit was reached for the current grid: until when (0: not). */
+  let gridLimited = 0;
+  let limitTimer = 0;
+
+  /** Big notice while the limit blocks the model fields; loads again by itself once it is over. */
+  const showLimit = () => {
+    clearTimeout(limitTimer);
+    const on = kind !== 'rain' && gridLimited > Date.now();
+    panel.notice.hidden = !on;
+    if (!on) return;
+    const some = !!grid && grid.temp.some((v) => !Number.isNaN(v));
+    panel.notice.innerHTML =
+      '<b>OPEN-METEO-LIMIT</b>' +
+      `<span>Wolken, Temperatur und Wind wieder ab ${hhmm(new Date(gridLimited))}.</span>` +
+      `<span>${some ? 'Zu sehen ist, was im Gerät gespeichert ist. ' : ''}Regen läuft weiter.</span>`;
+    limitTimer = window.setTimeout(() => {
+      gridLimited = 0;
+      showLimit();
+      sync();
+    }, gridLimited - Date.now() + 1000);
+  };
 
   // ---- drawing --------------------------------------------------------------
 
@@ -564,7 +587,9 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
       g.west <= area.west &&
       g.south + (g.ny - 1) * g.step >= area.north &&
       g.west + (g.nx - 1) * g.step >= area.east &&
-      Date.now() - g.t0 < 3 * HOUR_MS;
+      Date.now() - g.t0 < 3 * HOUR_MS &&
+      // A grid from the limit period may have gaps; looking again costs nothing while it lasts.
+      !(g === grid && gridLimited);
     // The loaded grid already covers this area at this or a finer spacing.
     if (covers(grid, s)) return progress(1, 1);
     if (fieldRequest) fieldRequest.cancelled = true;
@@ -586,13 +611,16 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     try {
       for (let i = 0; i < phases.length; i++) {
         progress(i, phases.length);
-        const g = await fieldGrid(area, phases[i], req);
-        if (!alive || req.cancelled || !g) return;
-        grid = g;
+        const r = await fieldGrid(area, phases[i], req);
+        if (!alive || req.cancelled || !r) return;
+        grid = r.grid;
+        gridLimited = r.limited;
         bigLoader = false;
         paint();
+        if (r.limited) break;
       }
       progress(1, 1);
+      showLimit();
     } catch (e) {
       if (!alive || req.cancelled) return;
       progress(1, 1);
@@ -768,6 +796,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
       labels.clearLayers();
       fieldLabels = [];
     } else cancelRain();
+    showLimit();
     // Cancelled rain frames are missing from the cache, so the next rain sync queues them again.
     progress(1, 1);
     sync();
@@ -786,6 +815,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
 
   return () => {
     alive = false;
+    clearTimeout(limitTimer);
     cancelRain();
     if (fieldRequest) fieldRequest.cancelled = true;
     clearTimeout(syncTimer);

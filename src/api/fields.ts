@@ -3,6 +3,8 @@
 // in one multi-location request. Every location counts as one API call (limit: 600 per
 // minute), so the lattice is coarse (lib/field smooths it), points are cached, the lattices
 // of neighbouring zoom levels share their points, and requests keep to a budget per minute.
+// Points are also stored on the device (IndexedDB), because iOS often ends the app and every
+// fresh start would otherwise ask for them again; there is an hourly limit of 5000 as well.
 
 import { getJson, HttpError } from '../lib/http';
 
@@ -14,6 +16,9 @@ const PAST_HOURS = 2;
 const FORECAST_HOURS = 100;
 /** Cached points are refreshed after this; the models run every 1–3 hours. */
 const MAX_AGE_MS = 45 * 60 * 1000;
+/** Older points are still shown while Open-Meteo's hourly or daily limit is reached. */
+const KEEP_MS = 6 * HOUR_MS;
+const LIMIT_KEY = 'wx.om.limit';
 /** Locations per request; keeps the URL short. */
 const CHUNK = 200;
 /** Locations per rolling minute; Open-Meteo allows 600, the rest is headroom for the other views. */
@@ -57,6 +62,96 @@ const pending = new Map<string, Promise<unknown>>();
 const spent: { t: number; n: number }[] = [];
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Open-Meteo's hourly or daily limit is reached; `until` is when asking again makes sense. */
+export class LimitError extends Error {
+  constructor(readonly until: number) {
+    super('Open-Meteo limit');
+  }
+}
+
+/** Time until which the hourly/daily limit blocks requests (0: not blocked). Shared by all tabs. */
+export function limitedUntil(): number {
+  try {
+    const v = Number(localStorage.getItem(LIMIT_KEY));
+    return v > Date.now() ? v : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function setLimited(hourly: boolean): number {
+  // The hourly limit resets with the next full hour; for the daily one try again in an hour.
+  const until = hourly ? (Math.floor(Date.now() / HOUR_MS) + 1) * HOUR_MS + MINUTE_MS : Date.now() + HOUR_MS;
+  try {
+    localStorage.setItem(LIMIT_KEY, String(until));
+  } catch {
+    /* ignore */
+  }
+  return until;
+}
+
+// ---- points on the device ---------------------------------------------------
+
+const DB_NAME = 'wx-fields';
+const STORE = 'points';
+
+function openDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+let db: Promise<IDBDatabase | null> | null = null;
+
+/**
+ * Loads the stored points into memory once and drops the old ones; without IndexedDB it just does nothing.
+ * Gives up after two seconds, so a stuck database never keeps the map empty.
+ */
+function restore(): Promise<IDBDatabase | null> {
+  db ??= Promise.race([load(), sleep(2000).then(() => null)]);
+  return db;
+}
+
+function load(): Promise<IDBDatabase | null> {
+  return (async () => {
+    try {
+      const d = await openDb();
+      await new Promise<void>((resolve) => {
+        const tx = d.transaction(STORE, 'readwrite');
+        const store = tx.objectStore(STORE);
+        const now = Date.now();
+        store.openCursor().onsuccess = (e) => {
+          const cur = (e.target as IDBRequest<IDBCursorWithValue | null>).result;
+          if (!cur) return;
+          const p = cur.value as Series;
+          if (now - p.loaded > KEEP_MS) cur.delete();
+          else if (!points.has(String(cur.key))) points.set(String(cur.key), p);
+          cur.continue();
+        };
+        tx.oncomplete = tx.onerror = tx.onabort = () => resolve();
+      });
+      return d;
+    } catch {
+      return null;
+    }
+  })();
+}
+
+async function store(entries: [string, Series][]): Promise<void> {
+  const d = await restore();
+  if (!d) return;
+  try {
+    const tx = d.transaction(STORE, 'readwrite');
+    const st = tx.objectStore(STORE);
+    for (const [k, p] of entries) st.put(p, k);
+  } catch {
+    /* storage full or unavailable: memory only */
+  }
+}
 
 /** Waits until `n` more locations fit into the budget of the last minute; false if cancelled meanwhile. */
 async function budget(n: number, signal: { cancelled: boolean }): Promise<boolean> {
@@ -127,15 +222,20 @@ async function fetchChunk(chunk: [number, number][], signal: { cancelled: boolea
     '&hourly=cloud_cover,temperature_2m,wind_speed_10m,wind_direction_10m' +
     `&past_hours=${PAST_HOURS}&forecast_hours=${FORECAST_HOURS}&timeformat=unixtime&timezone=GMT`;
   for (let attempt = 0; ; attempt++) {
+    const blocked = limitedUntil();
+    if (blocked) throw new LimitError(blocked);
     if (!(await budget(chunk.length, signal))) return;
     try {
       const res = await getJson<OmPoint | OmPoint[]>(url, 30000);
       const arr = Array.isArray(res) ? res : [res];
-      arr.forEach((p, j) => points.set(pointKey(...chunk[j]), toSeries(p)));
+      const entries = arr.map((p, j): [string, Series] => [pointKey(...chunk[j]), toSeries(p)]);
+      for (const [k, p] of entries) points.set(k, p);
+      store(entries);
       return;
     } catch (e) {
       // Only the per-minute limit is worth waiting for; the hourly and daily ones are not.
-      if (!(e instanceof HttpError && e.status === 429) || /hourly|daily/i.test(e.message) || attempt >= 3) throw e;
+      if (e instanceof HttpError && e.status === 429 && /hourly|daily/i.test(e.message)) throw new LimitError(setLimited(/hourly/i.test(e.message)));
+      if (!(e instanceof HttpError && e.status === 429) || attempt >= 3) throw e;
       // Someone else (another tab, another view) used up the minute: count it as full and wait.
       spent.push({ t: Date.now(), n: BUDGET });
       await sleep(15000 * (attempt + 1));
@@ -158,13 +258,16 @@ async function fetchPoints(list: [number, number][], signal: { cancelled: boolea
 
 /**
  * Loads the lattice points (spacing `step`) covering `area` and assembles them into a grid.
- * Only points that are not cached (or too old) are requested.
+ * Only points that are not cached (or too old) are requested. While Open-Meteo's hourly or daily
+ * limit is reached, the grid holds what is stored (up to 6 hours old) and `limited` says until when.
  */
 export async function fieldGrid(
   area: { south: number; west: number; north: number; east: number },
   step: number,
   signal: { cancelled: boolean },
-): Promise<FieldGrid | null> {
+): Promise<{ grid: FieldGrid; limited: number } | null> {
+  await restore();
+  let limited = 0;
   // Not clamped to the map's ±85°, so every lattice stays aligned with the finer ones.
   const s0 = Math.floor(area.south / step) * step;
   const n0 = Math.ceil(area.north / step) * step;
@@ -189,9 +292,16 @@ export async function fieldGrid(
       }
     }
     if (!missing.length && !running.size) break;
-    await Promise.all([fetchPoints(missing, signal), Promise.allSettled(running)]);
+    try {
+      await Promise.all([fetchPoints(missing, signal), Promise.allSettled(running)]);
+    } catch (e) {
+      if (!(e instanceof LimitError)) throw e;
+      limited = e.until;
+      break;
+    }
     if (signal.cancelled) return null;
   }
+  if (signal.cancelled) return null;
 
   // Align every point on the newest common start hour.
   const t0 = Math.floor(now / HOUR_MS) * HOUR_MS - PAST_HOURS * HOUR_MS;
@@ -214,7 +324,7 @@ export async function fieldGrid(
   for (let y = 0; y < ny; y++) {
     for (let x = 0; x < nx; x++) {
       const p = points.get(pointKey(s0 + y * step, w0 + x * step));
-      if (!p) continue;
+      if (!p || now - p.loaded > KEEP_MS) continue;
       const shift = Math.round((t0 - p.t0) / HOUR_MS);
       const k = y * nx + x;
       for (let h = 0; h < hours; h++) {
@@ -229,7 +339,7 @@ export async function fieldGrid(
       }
     }
   }
-  return grid;
+  return { grid, limited };
 }
 
 /** Number of lattice points an area needs at a spacing (to pick a coarser one on big screens). */

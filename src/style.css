@@ -572,6 +572,30 @@ section.block {
 .tape-days button:first-child { border-left-color: transparent; }
 .tape-days button:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
 .radar-progress.err { color: var(--danger); animation: none; }
+/* Notice over the map, e.g. when Open-Meteo's hourly limit is reached. */
+.radar-notice {
+  position: absolute;
+  z-index: 446;
+  left: 50%;
+  top: 38%;
+  transform: translate(-50%, -50%);
+  width: min(320px, calc(100% - 32px));
+  display: grid;
+  gap: 6px;
+  padding: 14px 16px;
+  border: 1px solid var(--yellow);
+  border-radius: 2px;
+  background: rgba(11, 2, 33, 0.85);
+  box-shadow: 0 0 12px rgba(249, 200, 14, 0.45);
+  pointer-events: none;
+  font-family: var(--vhs);
+  font-size: 20px;
+  line-height: 1.1;
+  color: #fff;
+  text-align: center;
+}
+.radar-notice[hidden] { display: none; }
+.radar-notice b { font-weight: 400; font-size: 26px; letter-spacing: 0.08em; color: var(--yellow); text-shadow: var(--rgb-split); }
 /* Values of the model fields on the map. */
 .field-label-icon { pointer-events: none; }
 .field-label {

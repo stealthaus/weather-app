@@ -10,7 +10,7 @@ export interface RadarFrame {
   forecast: boolean;
 }
 
-/** dBZ colour scale of the DWD layer (from GetLegendGraphic), used for the in-app legend. */
+/** dBZ colour scale of the DWD layer (from GetLegendGraphic), mapped to neon contour levels in lib/contour. */
 export const DBZ_COLORS = ['#99FFFF', '#33FFFF', '#00CACA', '#009934', '#4DBF1A', '#99CC00', '#CCE600', '#FFFF00', '#FFC400', '#FF8900', '#FF0000', '#B40000', '#4848FF', '#0000CA', '#990099', '#FF33FF'];
 
 async function capabilitiesEnd(): Promise<number> {

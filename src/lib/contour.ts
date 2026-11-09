@@ -3,12 +3,14 @@
 
 import { DBZ_COLORS, GLOBAL_COLORS, MODEL_COLORS } from '../api/radar';
 
-/** Neon colour per level (1 = leicht … 4 = Hagel möglich). */
-export const LEVEL_COLORS = ['#2de2e6', '#8f7bff', '#ff2fd6', '#f9c80e'];
+/** Neon colour per rain level (1 = leicht … 4 = Hagel möglich). */
+export const LEVEL_COLORS = ['#2de2e6', '#8f7bff', '#f9c80e', '#ff4b3a'];
+/** Snow is magenta in every level, heavier snow lighter (towards white). */
+export const SNOW_COLORS = ['#ff2fd6', '#ff2fd6', '#ff6be3', '#ffb3ef'];
+export const SNOW_COLOR = SNOW_COLORS[0];
 const NO_DATA = 255;
 
 const rgb = (hex: string) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
-const NEON = LEVEL_COLORS.map(rgb);
 
 /** Source colour scale mapped to levels, with a lookup cache per scale. */
 export interface Palette {
@@ -87,14 +89,19 @@ const GLOW1 = 2;
 const EDGE = 3;
 const code = (level: number, look: number) => 2 + (level - 1) * 4 + look;
 
-/** RGBA per code. */
-const LUT = new Uint8ClampedArray(256 * 4);
-// OUTSIDE stays transparent: shading it showed the radar's coverage shape as a veil over the map.
-NEON.forEach((c, i) => {
-  const level = i + 1;
-  const fill = 30 + 14 * level;
-  [fill, Math.max(55, fill), 140, 255].forEach((alpha, look) => LUT.set([...c, alpha], code(level, look) * 4));
-});
+/** RGBA per code, for rain and for snow. */
+const lut = (colors: string[]) => {
+  const t = new Uint8ClampedArray(256 * 4);
+  // OUTSIDE stays transparent: shading it showed the radar's coverage shape as a veil over the map.
+  colors.map(rgb).forEach((c, i) => {
+    const level = i + 1;
+    const fill = 30 + 14 * level;
+    [fill, Math.max(55, fill), 140, 255].forEach((alpha, look) => t.set([...c, alpha], code(level, look) * 4));
+  });
+  return t;
+};
+const LUT = lut(LEVEL_COLORS);
+const SNOW_LUT = lut(SNOW_COLORS);
 
 /** Classifies a DWD image into contour codes (one byte per pixel). */
 export function contourCodes(img: ImageData, pal: Palette): Uint8Array {
@@ -130,15 +137,39 @@ export function contourCodes(img: ImageData, pal: Palette): Uint8Array {
   return out;
 }
 
-/** Paints contour codes into an ImageData of the same size. */
-export function paintCodes(codes: Uint8Array, img: ImageData): void {
+/** Where precipitation is snow: one byte per cell of `2^shift` × `2^shift` image pixels, `w` cells per row. */
+export interface SnowCells {
+  cells: Uint8Array;
+  w: number;
+  shift: number;
+}
+
+/** Paints contour codes into an ImageData of the same size; in snow cells in the snow colours. */
+export function paintCodes(codes: Uint8Array, img: ImageData, snow?: SnowCells | null): void {
   const d = img.data;
-  for (let k = 0, o = 0; k < codes.length; k++, o += 4) {
-    const c = codes[k] * 4;
-    d[o] = LUT[c];
-    d[o + 1] = LUT[c + 1];
-    d[o + 2] = LUT[c + 2];
-    d[o + 3] = LUT[c + 3];
+  if (!snow) {
+    for (let k = 0, o = 0; k < codes.length; k++, o += 4) {
+      const c = codes[k] * 4;
+      d[o] = LUT[c];
+      d[o + 1] = LUT[c + 1];
+      d[o + 2] = LUT[c + 2];
+      d[o + 3] = LUT[c + 3];
+    }
+    return;
+  }
+  const { width: w, height: h } = img;
+  const { cells, w: cw, shift } = snow;
+  for (let y = 0, k = 0; y < h; y++) {
+    const crow = (y >> shift) * cw;
+    for (let x = 0; x < w; x++, k++) {
+      const c = codes[k] * 4;
+      const t = cells[crow + (x >> shift)] ? SNOW_LUT : LUT;
+      const o = k * 4;
+      d[o] = t[c];
+      d[o + 1] = t[c + 1];
+      d[o + 2] = t[c + 2];
+      d[o + 3] = t[c + 3];
+    }
   }
 }
 

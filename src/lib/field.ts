@@ -251,3 +251,46 @@ export function renderField(g: FieldGrid, kind: FieldKind, t: number, rowLat: Fl
     data[o + 3] = a;
   }
 }
+
+/**
+ * Wet-bulb temperature (°C) at or below which precipitation is drawn as snow. Around +1 °C rain and
+ * snow are about equally likely; wet snow and sleet count as snow here.
+ */
+const SNOW_WET = 1;
+
+/**
+ * Marks where precipitation falls as snow at time `t` (1) and where not or unknown (0), one byte per
+ * cell of a raster in Web Mercator; `rowLat`/`colLon` give the latitude of every row and the longitude
+ * of every column, as for renderField.
+ */
+export function snowMask(g: FieldGrid, t: number, rowLat: Float64Array, colLon: Float64Array, out: Uint8Array): void {
+  const w = colLon.length;
+  const h = rowLat.length;
+  out.fill(0);
+  if (g.nx < 2 || g.ny < 2) return;
+  const { data: fd, nx: fnx, ny: fny } = refine(slice(g, g.wet, t), g.nx, g.ny);
+  const cx = new Int32Array(w).fill(-1);
+  const cax = new Float32Array(w);
+  for (let x = 0; x < w; x++) {
+    const fx = ((colLon[x] - g.west) / g.step) * REFINE;
+    if (fx < 0 || fx > fnx - 1) continue;
+    cx[x] = Math.min(fnx - 2, Math.floor(fx));
+    cax[x] = fx - cx[x];
+  }
+  for (let y = 0; y < h; y++) {
+    const fy = ((rowLat[y] - g.south) / g.step) * REFINE;
+    if (fy < 0 || fy > fny - 1) continue;
+    const y0 = Math.min(fny - 2, Math.floor(fy));
+    const ay = fy - y0;
+    const o = y0 * fnx;
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      const x0 = cx[x];
+      if (x0 < 0) continue;
+      const ax = cax[x];
+      const k = o + x0;
+      // NaN (no data) compares false and stays rain.
+      if ((fd[k] * (1 - ax) + fd[k + 1] * ax) * (1 - ay) + (fd[k + fnx] * (1 - ax) + fd[k + fnx + 1] * ax) * ay <= SNOW_WET) out[row + x] = 1;
+    }
+  }
+}

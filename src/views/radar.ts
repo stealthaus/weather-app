@@ -3,8 +3,8 @@ import 'leaflet/dist/leaflet.css';
 import { fieldGrid, latticeSize, latticeStep, type FieldGrid, type FieldKind } from '../api/fields';
 import { GLOBAL_LAYER, globalTime, RADAR_DOMAIN, radarFrames, radarImageUrl, type RadarFrame } from '../api/radar';
 import { addBasemap, BASEMAP_ATTRIBUTION, fitMinZoom, MAP_BOUNDS } from '../lib/basemap';
-import { contourCodes, coverageMask, GLOBAL_PALETTE, LEVEL_COLORS, MODEL_PALETTE, paintCodes, RADAR_PALETTE, type Palette } from '../lib/contour';
-import { legendGradient, renderField, sampleField } from '../lib/field';
+import { contourCodes, coverageMask, GLOBAL_PALETTE, LEVEL_COLORS, MODEL_PALETTE, paintCodes, RADAR_PALETTE, SNOW_COLOR, type Palette, type SnowCells } from '../lib/contour';
+import { legendGradient, renderField, sampleField, snowMask } from '../lib/field';
 import { hhmm } from '../lib/format';
 import { HttpError } from '../lib/http';
 import type { Place } from '../lib/places';
@@ -64,6 +64,8 @@ const MODEL_MAX_AGE_MS = HOUR_MS;
 const FIELD_MAX_PIXELS = 150_000;
 /** Open-Meteo counts every lattice point as one API call (600 per minute). */
 const MAX_FIELD_POINTS = 250;
+/** Snow or rain is decided per block of 2^SNOW_SHIFT × 2^SNOW_SHIFT image pixels (the model is far coarser). */
+const SNOW_SHIFT = 2;
 /** Distance of the value labels on the map in screen pixels. */
 const LABEL_DX = 84;
 const LABEL_DY = 76;
@@ -225,7 +227,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   }).setView([place.lat, place.lon], 8);
   map.attributionControl.setPrefix(false);
   // The field layers show no DWD data, so each layer names only its own source.
-  const RAIN_ATTRIBUTION = `${BASEMAP_ATTRIBUTION} · Radar © <a href="https://www.dwd.de">DWD</a>`;
+  const RAIN_ATTRIBUTION = `${BASEMAP_ATTRIBUTION} · Radar © <a href="https://www.dwd.de">DWD</a> · Schnee © <a href="https://open-meteo.com">Open-Meteo</a>`;
   const FIELD_ATTRIBUTION = `${BASEMAP_ATTRIBUTION} · Modell © <a href="https://open-meteo.com">Open-Meteo</a>`;
 
   addBasemap(map, [place.lat, place.lon]);
@@ -321,6 +323,31 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
 
   // ---- drawing --------------------------------------------------------------
 
+  /** Latitude of every row and longitude of every column when a view is drawn `w` × `h` large. */
+  const axes = (v: View, w: number, h: number) => {
+    const rowLat = new Float64Array(h);
+    const colLon = new Float64Array(w);
+    const sx = (v.px.max!.x - v.px.min!.x) / w;
+    const sy = (v.px.max!.y - v.px.min!.y) / h;
+    for (let y = 0; y < h; y++) rowLat[y] = map.unproject([v.px.min!.x, v.px.min!.y + (y + 0.5) * sy], v.zoom).lat;
+    for (let x = 0; x < w; x++) colLon[x] = map.unproject([v.px.min!.x + (x + 0.5) * sx, v.px.min!.y], v.zoom).lng;
+    return { rowLat, colLon };
+  };
+  const snowAxes = new WeakMap<View, { rowLat: Float64Array; colLon: Float64Array }>();
+
+  /** Snow cells for a rain view at time `t` from the model grid; null if there is no snow (or no grid). */
+  const snowCells = (v: View, t: number): SnowCells | null => {
+    if (!grid) return null;
+    let a = snowAxes.get(v);
+    if (!a) {
+      a = axes(v, Math.ceil(v.w / 2 ** SNOW_SHIFT), Math.ceil(v.h / 2 ** SNOW_SHIFT));
+      snowAxes.set(v, a);
+    }
+    const cells = new Uint8Array(a.rowLat.length * a.colLon.length);
+    snowMask(grid, t, a.rowLat, a.colLon, cells);
+    return cells.includes(1) ? { cells, w: a.colLon.length, shift: SNOW_SHIFT } : null;
+  };
+
   const clear = (l: Layer) => l.ctx.clearRect(0, 0, l.canvas.width, l.canvas.height);
 
   /** Sizes a layer's canvas for a view. */
@@ -334,14 +361,14 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     return l.shown.img;
   };
 
-  /** Draws a loaded frame into a layer; false if there is nothing to draw. */
-  const draw = (l: Layer, d: FrameData | undefined): boolean => {
+  /** Draws a loaded frame into a layer (snow in its own colours); false if there is nothing to draw. */
+  const draw = (l: Layer, d: FrameData | undefined, t: number): boolean => {
     if (!d) {
       clear(l);
       return false;
     }
     const img = fit(l, d.view);
-    paintCodes(d.codes, img);
+    paintCodes(d.codes, img, snowCells(d.view, t));
     l.ctx.putImageData(img, 0, 0);
     return true;
   };
@@ -349,8 +376,9 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   const paintRain = (f: RadarFrame) => {
     const d = f.layer ? cache.get(key(f)) : undefined;
     const g = cache.get(worldKey(f));
-    draw(fine, d);
-    if (!draw(world, g) || !g || !d || d.view.zoom !== g.view.zoom) return;
+    const t = f.time.getTime();
+    draw(fine, d, t);
+    if (!draw(world, g, t) || !g || !d || d.view.zoom !== g.view.zoom) return;
     const { w, h, px } = d.view;
     if (mask.width !== w || mask.height !== h || !maskImg) {
       mask.width = w;
@@ -577,19 +605,17 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     }
   };
 
-  /** Loads the model field for the current view (one request for all hours and all three fields). */
+  /**
+   * Loads the model field for the current view (one request for all hours and all fields). The rain
+   * layer needs it too, to tell snow from rain; there it loads quietly, without loader or messages.
+   */
   const syncField = async () => {
+    const loud = kind !== 'rain';
     const v = neededView(WORLD, fieldView, FIELD_MAX_PIXELS);
     if (!v) return;
     if (v !== fieldView) {
       fieldView = v;
-      const rowLat = new Float64Array(v.h);
-      const colLon = new Float64Array(v.w);
-      const sx = (v.px.max!.x - v.px.min!.x) / v.w;
-      const sy = (v.px.max!.y - v.px.min!.y) / v.h;
-      for (let y = 0; y < v.h; y++) rowLat[y] = map.unproject([v.px.min!.x, v.px.min!.y + (y + 0.5) * sy], v.zoom).lat;
-      for (let x = 0; x < v.w; x++) colLon[x] = map.unproject([v.px.min!.x + (x + 0.5) * sx, v.px.min!.y], v.zoom).lng;
-      fieldAxes = { rowLat, colLon };
+      fieldAxes = axes(v, v.w, v.h);
     }
     placeLabels();
     paint();
@@ -609,11 +635,11 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
       // A grid from the limit period may have gaps; looking again costs nothing while it lasts.
       !(g === grid && gridLimited);
     // The loaded grid already covers this area at this or a finer spacing.
-    if (covers(grid, s)) return progress(1, 1);
+    if (covers(grid, s)) return loud ? progress(1, 1) : undefined;
     if (fieldRequest) fieldRequest.cancelled = true;
     const req = { cancelled: false };
     fieldRequest = req;
-    bigLoader = !grid;
+    if (loud) bigLoader = !grid;
     // After zooming out, first a lattice four times coarser (a sixteenth of the points, all of them
     // part of the fine lattice too, so nothing is asked twice): the whole screen has a field at
     // once, even if the fine lattice has to wait for Open-Meteo's per-minute limit.
@@ -628,19 +654,20 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     const phases = covers(grid, coarse) || filled(grid) > 0.6 ? [s] : [coarse, s];
     try {
       for (let i = 0; i < phases.length; i++) {
-        progress(i, phases.length);
+        if (loud) progress(i, phases.length);
         const r = await fieldGrid(area, phases[i], req);
         if (!alive || req.cancelled || !r) return;
         grid = r.grid;
         gridLimited = r.limited;
-        bigLoader = false;
+        if (loud) bigLoader = false;
         paint();
         if (r.limited) break;
       }
-      progress(1, 1);
+      if (loud) progress(1, 1);
       showLimit();
     } catch (e) {
-      if (!alive || req.cancelled) return;
+      // Without the model the rain layer just shows everything as rain.
+      if (!alive || req.cancelled || !loud) return;
       progress(1, 1);
       panel.progress.textContent = e instanceof HttpError && e.status === 429 ? 'LIMIT – SPÄTER' : 'KEIN SIGNAL';
       panel.progress.classList.add('err');
@@ -653,14 +680,17 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   const sync = () => {
     if (!alive || !frames.length) return;
     if (kind === 'rain') syncRain();
-    else syncField();
+    syncField();
   };
 
   let syncTimer = 0;
+  let fieldTimer = 0;
   const scheduleSync = () => {
     clearTimeout(syncTimer);
+    clearTimeout(fieldTimer);
+    if (kind === 'rain') syncTimer = window.setTimeout(() => alive && frames.length && syncRain(), 250);
     // Model fields wait a little longer, so zooming through several levels asks only for the last one.
-    syncTimer = window.setTimeout(sync, kind === 'rain' ? 250 : 800);
+    fieldTimer = window.setTimeout(() => alive && frames.length && syncField(), 800);
   };
   map.on('moveend resize', scheduleSync);
 
@@ -685,10 +715,34 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
   };
 
   panel.play.addEventListener('click', () => (timer ? stop() : play()));
+  // Keyboard and screen readers use the range input.
   panel.range.addEventListener('input', () => {
     stop();
     show(Number(panel.range.value));
   });
+  // Finger and mouse: tap anywhere on the tape or slide along it. iOS only moves a range input when
+  // its (here invisible) thumb is hit, so the tape reads the pointer itself.
+  const tape = el.querySelector<HTMLElement>('.tape')!;
+  const scrub = (e: PointerEvent) => {
+    const r = panel.bars.getBoundingClientRect();
+    if (!frames.length || !r.width) return;
+    const i = Math.max(0, Math.min(frames.length - 1, Math.floor(((e.clientX - r.left) / r.width) * frames.length)));
+    if (i !== index) show(i);
+  };
+  tape.addEventListener('pointerdown', (e) => {
+    if ((e.target as HTMLElement).closest('.tape-days') || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    e.preventDefault();
+    stop();
+    tape.setPointerCapture(e.pointerId);
+    tape.classList.add('scrubbing');
+    scrub(e);
+  });
+  tape.addEventListener('pointermove', (e) => {
+    if (tape.hasPointerCapture(e.pointerId)) scrub(e);
+  });
+  const release = () => tape.classList.remove('scrubbing');
+  tape.addEventListener('pointerup', release);
+  tape.addEventListener('pointercancel', release);
 
   // ---- frames, step and layer -----------------------------------------------
 
@@ -792,7 +846,8 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     panel.map.setAttribute('aria-label', `Karte: ${k.name}`);
     if (kind === 'rain') {
       panel.legend.className = 'radar-legend';
-      panel.legend.innerHTML = LEVEL_NAMES.map((n, i) => `<span style="color:${LEVEL_COLORS[i]}"><i></i>${n}</span>`).join('');
+      panel.legend.innerHTML =
+        LEVEL_NAMES.map((n, i) => `<span style="color:${LEVEL_COLORS[i]}"><i></i>${n}</span>`).join('') + `<span style="color:${SNOW_COLOR}"><i></i>SCHNEE</span>`;
       setAttribution(RAIN_ATTRIBUTION);
     } else {
       const [lo, hi] = FIELD_LEGEND[kind];
@@ -838,6 +893,7 @@ export function mountRadar(el: HTMLElement, place: Place): () => void {
     cancelRain();
     if (fieldRequest) fieldRequest.cancelled = true;
     clearTimeout(syncTimer);
+    clearTimeout(fieldTimer);
     stop();
     ro.disconnect();
     map.remove();

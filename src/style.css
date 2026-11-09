@@ -510,7 +510,11 @@ section.block {
   box-shadow: 0 0 8px rgba(255, 255, 255, 0.35);
   cursor: pointer;
 }
-.tape { position: relative; flex: 1; min-width: 0; height: 36px; }
+/* The tape handles touch itself (see views/radar), so the browser must not scroll or zoom on it. */
+.tape { position: relative; flex: 1; min-width: 0; height: 36px; touch-action: none; -webkit-user-select: none; user-select: none; cursor: pointer; }
+/* Taller hit area above and below the bars: easier to catch with a thumb. */
+.tape::before { content: ''; position: absolute; left: 0; right: 0; top: -10px; bottom: -10px; }
+.has-days .tape::before { bottom: 0; }
 .tape-bars { position: absolute; inset: 0; display: flex; align-items: center; gap: 2px; }
 .tape-bars i { flex: 1; height: 14px; background: rgba(255, 255, 255, 0.18); }
 .tape-bars i.played { background: #fff; box-shadow: 0 0 6px rgba(255, 255, 255, 0.7); }
@@ -521,7 +525,7 @@ section.block {
 .tape-bars i.now { height: 24px; }
 .tape-bars.dense { gap: 1px; }
 /* Invisible range input on top of the bars keeps drag, tap and keyboard control. */
-.tape input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.tape input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; pointer-events: none; }
 .tape:has(input:focus-visible) { outline: 2px solid var(--cyan); outline-offset: 2px; }
 .tape-counter { flex: none; min-width: 6ch; text-align: right; font-size: 28px; white-space: pre; color: #fff; text-shadow: var(--rgb-split); }
 .radar-legend { display: flex; justify-content: space-between; margin-top: 8px; font-size: 18px; }

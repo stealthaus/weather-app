@@ -35,6 +35,8 @@ interface Series {
   t0: number;
   clouds: Float32Array;
   temp: Float32Array;
+  /** Dew point; missing in points stored before snow was shown (those are loaded again). */
+  dew?: Float32Array;
   /** km/h */
   speed: Float32Array;
   /** Wind vector in km/h, pointing where the wind blows to (u east, v north). */
@@ -48,6 +50,7 @@ interface OmPoint {
     time: number[];
     cloud_cover: (number | null)[];
     temperature_2m: (number | null)[];
+    dew_point_2m: (number | null)[];
     wind_speed_10m: (number | null)[];
     wind_direction_10m: (number | null)[];
   };
@@ -180,6 +183,8 @@ export interface FieldGrid {
   hours: number;
   clouds: Float32Array;
   temp: Float32Array;
+  /** Wet-bulb temperature (°C): decides between rain and snow on the radar. */
+  wet: Float32Array;
   speed: Float32Array;
   u: Float32Array;
   v: Float32Array;
@@ -208,7 +213,7 @@ function toSeries(p: OmPoint): Series {
     u[i] = -speed[i] * Math.sin(r);
     v[i] = -speed[i] * Math.cos(r);
   }
-  return { t0: h.time[0] * 1000, clouds: f(h.cloud_cover), temp: f(h.temperature_2m), speed, u, v, loaded: Date.now() };
+  return { t0: h.time[0] * 1000, clouds: f(h.cloud_cover), temp: f(h.temperature_2m), dew: f(h.dew_point_2m), speed, u, v, loaded: Date.now() };
 }
 
 /** One request; after "too many requests" it waits and tries again. */
@@ -219,7 +224,7 @@ async function fetchChunk(chunk: [number, number][], signal: { cancelled: boolea
   const url =
     'https://api.open-meteo.com/v1/forecast' +
     `?latitude=${chunk.map((p) => lat(p[0])).join(',')}&longitude=${chunk.map((p) => lon(p[1])).join(',')}` +
-    '&hourly=cloud_cover,temperature_2m,wind_speed_10m,wind_direction_10m' +
+    '&hourly=cloud_cover,temperature_2m,dew_point_2m,wind_speed_10m,wind_direction_10m' +
     `&past_hours=${PAST_HOURS}&forecast_hours=${FORECAST_HOURS}&timeformat=unixtime&timezone=GMT`;
   for (let attempt = 0; ; attempt++) {
     const blocked = limitedUntil();
@@ -288,7 +293,7 @@ export async function fieldGrid(
         const p = points.get(k);
         const r = pending.get(k);
         if (r) running.add(r);
-        else if (!p || now - p.loaded > MAX_AGE_MS) missing.push([lat, lon]);
+        else if (!p || !p.dew || now - p.loaded > MAX_AGE_MS) missing.push([lat, lon]);
       }
     }
     if (!missing.length && !running.size) break;
@@ -317,6 +322,7 @@ export async function fieldGrid(
     hours,
     clouds: new Float32Array(hours * size).fill(NaN),
     temp: new Float32Array(hours * size).fill(NaN),
+    wet: new Float32Array(hours * size).fill(NaN),
     speed: new Float32Array(hours * size).fill(NaN),
     u: new Float32Array(hours * size).fill(NaN),
     v: new Float32Array(hours * size).fill(NaN),
@@ -333,6 +339,8 @@ export async function fieldGrid(
         const o = h * size + k;
         grid.clouds[o] = p.clouds[i];
         grid.temp[o] = p.temp[i];
+        // One-third rule: the wet-bulb temperature lies about a third of the way from air temperature to dew point.
+        if (p.dew) grid.wet[o] = p.temp[i] - (p.temp[i] - p.dew[i]) / 3;
         grid.speed[o] = p.speed[i];
         grid.u[o] = p.u[i];
         grid.v[o] = p.v[i];
